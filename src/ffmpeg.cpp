@@ -225,8 +225,10 @@ QStringList trimArgs(const QString &src, const QString &dst, double start, doubl
         // decoded to, and AVFoundation cannot play High 4:4:4 Predictive at all:
         // a VP9 source re-encoded without this came out as h264+aac and
         // QuickTime still refused it. 4:2:0 is also what makes the even-frame
-        // rule absolute rather than conditional, since 4:2:0 cannot represent an
-        // odd side.
+        // rule absolute FOR THIS PIPELINE, since 4:2:0 cannot represent an odd
+        // side. That is narrower than "odd frames do not encode" — MJPEG takes
+        // them happily. The rule holds because the format is pinned right here,
+        // so whoever unpins it is re-opening the odd-frame question too.
         args << "-preset" << "veryfast" << "-crf" << "18"
              << "-pix_fmt" << "yuv420p";
     }

@@ -17,6 +17,10 @@ ApplicationWindow {
     readonly property color accent: backend.themeAccent
     readonly property color accentForeground: backend.themeAccentForeground
     readonly property bool audioOutputReady: audioOutput !== null
+    readonly property bool isMac: Qt.platform.os === "osx"
+    // "monospace" is a family Linux resolves and macOS does not — there it costs
+    // a full font-alias sweep and still lands on a proportional face.
+    readonly property string monoFont: isMac ? "Menlo" : "monospace"
     property var audioOutput: null
     property string noticeText: ""
     property bool helpVisible: false
@@ -168,15 +172,20 @@ ApplicationWindow {
         onActivated: togglePlay()
     }
 
+    // Qt maps a portable "Ctrl" onto the Command key on macOS, which turns this
+    // one into ⌘Space — Spotlight, and the system wins. ⌃Space (Meta+Space) is
+    // no better: that is the input-source switcher. So the in and out points
+    // also answer to I and O there, the way video editors have always spelled
+    // them. Linux keeps the chords it has always had.
     Shortcut {
-        sequence: "Ctrl+Space"
+        sequences: win.isMac ? ["Ctrl+Space", "I"] : ["Ctrl+Space"]
         context: Qt.ApplicationShortcut
         enabled: win.hasVideo && !win.quitConfirmVisible
         onActivated: moveTrimStartTo(trimBar.playheadSec)
     }
 
     Shortcut {
-        sequence: "Alt+Space"
+        sequences: win.isMac ? ["Alt+Space", "O"] : ["Alt+Space"]
         context: Qt.ApplicationShortcut
         enabled: win.hasVideo && !win.quitConfirmVisible
         onActivated: moveTrimEndTo(trimBar.playheadSec)
@@ -565,7 +574,7 @@ ApplicationWindow {
                 text: win.statusText
                 color: win.noticeText !== "" ? win.accent : "#b8b8bc"
                 font.pixelSize: 13
-                font.family: "monospace"
+                font.family: win.monoFont
                 horizontalAlignment: Text.AlignHCenter
                 verticalAlignment: Text.AlignVCenter
                 elide: Text.ElideMiddle
@@ -579,7 +588,7 @@ ApplicationWindow {
                     + (trimBar.zoomed ? " · <font color=\"" + win.accent + "\">zoomed</font>" : "")
                 color: "#d6d6da"
                 font.pixelSize: 13
-                font.family: "monospace"
+                font.family: win.monoFont
             }
         }
     }
@@ -646,12 +655,12 @@ ApplicationWindow {
                         { keys: "Space", action: "Play / pause" },
                         { keys: "← / →", action: "Move playhead 1s" },
                         { keys: "Shift ← / →", action: "Move playhead 5s" },
-                        { keys: "Alt ← / →", action: "Move playhead 0.2s" },
-                        { keys: "Ctrl Space", action: "Trim start to playhead" },
-                        { keys: "Alt Space", action: "Trim end to playhead" },
+                        { keys: win.isMac ? "⌥ ← / →" : "Alt ← / →", action: "Move playhead 0.2s" },
+                        { keys: win.isMac ? "I" : "Ctrl Space", action: "Trim start to playhead" },
+                        { keys: win.isMac ? "O" : "Alt Space", action: "Trim end to playhead" },
                         { keys: "Z", action: "Zoom the selection" },
-                        { keys: "Ctrl O", action: "Open a video" },
-                        { keys: "Ctrl S", action: "Export" },
+                        { keys: win.isMac ? "⌘ O" : "Ctrl O", action: "Open a video" },
+                        { keys: win.isMac ? "⌘ S" : "Ctrl S", action: "Export" },
                         { keys: "Q", action: "Quit" },
                         { keys: "?", action: "Show these shortcuts" }
                     ]
@@ -663,7 +672,7 @@ ApplicationWindow {
                             text: modelData.keys
                             color: win.accent
                             font.pixelSize: 13
-                            font.family: "monospace"
+                            font.family: win.monoFont
                         }
                         Label {
                             text: modelData.action

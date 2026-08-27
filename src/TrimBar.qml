@@ -186,7 +186,8 @@ Item {
             text: Format.fmt(root.activeTime)
             color: "white"
             font.pixelSize: 15
-            font.family: "monospace"
+            // Same reason as Main.qml: "monospace" resolves to nothing on macOS.
+            font.family: Qt.platform.os === "osx" ? "Menlo" : "monospace"
             font.weight: Font.DemiBold
         }
     }

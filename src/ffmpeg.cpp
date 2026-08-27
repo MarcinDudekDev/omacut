@@ -17,7 +17,24 @@ constexpr int kThumbPollMs = 50;
 }
 
 QString toolPath(const QString &tool) {
-    return QStandardPaths::findExecutable(tool);
+    const QString onPath = QStandardPaths::findExecutable(tool);
+    if (!onPath.isEmpty())
+        return onPath;
+
+#ifdef Q_OS_MACOS
+    // A .app launched from Finder or the Dock inherits launchd's PATH, which is
+    // /usr/bin:/bin:/usr/sbin:/sbin and nothing else — so an ffmpeg installed by
+    // Homebrew or MacPorts is invisible even though it works fine in a terminal.
+    // Fall back to where those installers actually put it before giving up.
+    static const QStringList extraDirs{
+        QStringLiteral("/opt/homebrew/bin"),  // Homebrew, Apple silicon
+        QStringLiteral("/usr/local/bin"),     // Homebrew, Intel
+        QStringLiteral("/opt/local/bin"),     // MacPorts
+    };
+    return QStandardPaths::findExecutable(tool, extraDirs);
+#else
+    return QString();
+#endif
 }
 
 VideoInfo probe(const QString &path) {

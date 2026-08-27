@@ -15,6 +15,7 @@
 #include <QTemporaryDir>
 
 #include "backend.h"
+#include "ffmpeg.h"
 #include "filepicker.h"
 #include "thumbprovider.h"
 #include "thumbworker.h"
@@ -204,6 +205,9 @@ private slots:
     void themeAccentForegroundKeepsContrast();
 #ifndef Q_OS_LINUX
     void nativeExportFiltersCarryTheQualityChoice();
+#endif
+#ifdef Q_OS_MACOS
+    void toolPathSurvivesTheLaunchdPath();
 #endif
 
 private:
@@ -962,6 +966,30 @@ void BackendTests::nativeExportFiltersCarryTheQualityChoice() {
     // picker gives when no choice comes back at all.
     QCOMPARE(NativeFilePicker::scaleHeightForFilter(QStringLiteral("Whatever (*.mp4)")), 0);
     QCOMPARE(NativeFilePicker::scaleHeightForFilter(QString()), 0);
+}
+#endif
+
+#ifdef Q_OS_MACOS
+// A .app launched from Finder gets launchd's PATH, which has no Homebrew in it.
+// Bare findExecutable() therefore fails and the app reports "ffprobe was not
+// found" on a machine where ffprobe plainly works — so toolPath() has to look
+// past PATH. The first check is the falsifier: if the stripped PATH could still
+// find ffprobe, the second check would prove nothing.
+void BackendTests::toolPathSurvivesTheLaunchdPath() {
+    EnvVarGuard pathGuard("PATH");
+    qputenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+
+    if (!QStandardPaths::findExecutable(QStringLiteral("ffprobe")).isEmpty())
+        QSKIP("ffprobe is on the launchd PATH here, so there is nothing to fall back from.");
+
+    const QString found = ffmpeg::toolPath(QStringLiteral("ffprobe"));
+    if (found.isEmpty())
+        QSKIP("ffprobe is installed somewhere this fallback does not know about.");
+    QVERIFY(QFileInfo(found).isExecutable());
+
+    // And a tool that really is missing still comes back empty rather than
+    // some half-path the callers would try to run.
+    QVERIFY(ffmpeg::toolPath(QStringLiteral("omacut-no-such-tool")).isEmpty());
 }
 #endif
 

@@ -64,9 +64,16 @@ cp -R build/omacut.app /Applications/
 ```
 
 `./bin/build` alone gives you an app that runs on *this* machine — it still loads
-Qt out of Homebrew. `./bin/bundle` runs `macdeployqt` and re-signs, after which
-the `.app` is self-contained and can be copied to another Mac. `ffmpeg` stays an
+Qt out of Homebrew. `./bin/bundle` runs `macdeployqt`, drops the plugins it
+collected but could not complete, checks the result and re-signs, after which the
+`.app` is self-contained and can be copied to another Mac. `ffmpeg` stays an
 external dependency either way; it is not bundled.
+
+`macdeployqt` on a Homebrew Qt reports dozens of `Cannot resolve rpath` errors
+and still exits 0, so its exit code is not evidence that the bundle works.
+`./bin/verify-bundle build/omacut.app` is what decides: it walks every Mach-O
+inside and fails if anything still points outside the bundle. `bin/bundle` will
+not sign a bundle that does not pass it, and you can run it on its own.
 
 Differences from the Linux build, all of them forced by the platform:
 

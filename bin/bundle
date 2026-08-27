@@ -1,7 +1,8 @@
 #!/usr/bin/env sh
 # Turn build/omacut.app into a self-contained bundle: copies the Qt frameworks
-# and QML plugins in, rewrites the load paths, and re-signs. After this the .app
-# runs on a Mac with no Homebrew and no Qt — drag it to /Applications and go.
+# and QML plugins in, rewrites the load paths, drops what macdeployqt collected
+# but could not complete, checks that nothing inside still points outside, and
+# re-signs. After this the .app runs on a Mac with no Homebrew and no Qt.
 #
 # ffmpeg is NOT bundled. It stays an external dependency (`brew install ffmpeg`),
 # same as on Linux, because shipping a GPL ffmpeg build inside an MIT app is a
@@ -10,6 +11,7 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 APP="$ROOT/build/omacut.app"
+FW="$APP/Contents/Frameworks"
 
 case "$(uname -s)" in
   Darwin) ;;
@@ -29,22 +31,83 @@ else
   exit 1
 fi
 
-# Homebrew splits Qt into one keg per module and macdeployqt only searches the
-# handful that appear in the binary's rpath, so QtSvg and friends come back as
-# "Cannot resolve rpath" unless the umbrella lib dir is on the search path too.
-LIBPATH=""
-if command -v brew >/dev/null 2>&1 && [ -d "$(brew --prefix)/lib" ]; then
-  LIBPATH="-libpath=$(brew --prefix)/lib"
-fi
+LOG="$APP.macdeployqt.log"
 
-# -qmldir points at the QML sources, not the app: the UI ships inside a Qt
-# resource, which macdeployqt cannot scan for imports.
-"$DEPLOY" "$APP" -qmldir="$ROOT/src" ${LIBPATH:+$LIBPATH}
+# The @rpath dependencies of one binary that are not present in the bundle.
+# Line 1 of otool -L is the filename and line 2 is a dylib's own install id, so
+# both are skipped; for a plain executable line 2 is a real dependency, which is
+# why the executable is checked with its own call below.
+missing_rpath_deps() {
+  otool -L "$1" 2>/dev/null | tail -n +"$2" | awk '{print $1}' \
+    | grep '^@rpath/' | while IFS= read -r dep; do
+        [ -e "$FW/${dep#@rpath/}" ] || printf '%s\n' "${dep#@rpath/}"
+      done
+}
 
-# arm64 refuses to run a binary whose signature no longer matches, and
-# macdeployqt has just rewritten every load command in it.
+# Homebrew splits Qt into one keg per module, and the QML plugins it ships carry
+# rpaths that point only at qtbase and qtdeclarative. macdeployqt copies whole
+# plugin directories, so it drags in plugins for modules omacut never imports
+# (virtual keyboard, Qt3D, PDF, state machine) and then cannot find the
+# frameworks they need. It reports every one of those as ERROR and still exits 0.
+"$DEPLOY" "$APP" -qmldir="$ROOT/src" >"$LOG" 2>&1 || {
+  echo "macdeployqt failed; see $LOG" >&2
+  exit 1
+}
+DEPLOY_ERRORS=$(grep -c '^ERROR' "$LOG" || true)
+
+# Drop the plugins whose dependencies did not come with them. This is a
+# consequence of what is actually in the bundle, not a hand-maintained list of
+# names, so whatever macdeployqt over-collects next release is handled too.
+#
+# Every QML plugin lands twice: once under PlugIns/ and once under
+# Resources/qml/<Module>/, where the second is a symlink to the first. Deleting
+# only the PlugIns copy leaves a dangling link behind, and codesign then fails
+# with a bare "No such file or directory" naming the bundle rather than the link.
+PRUNED=0
+for plugin in $(find "$APP/Contents/PlugIns" -type f -name '*.dylib' 2>/dev/null); do
+  MISS=$(missing_rpath_deps "$plugin" 3)
+  [ -n "$MISS" ] || continue
+  case "$plugin" in
+    # These are load-bearing: no cocoa plugin means no window at all, and the
+    # multimedia and imageformats plugins are on the paths omacut actually uses.
+    # A break in one of those is a real failure, not something to tidy away.
+    */platforms/*|*/multimedia/*|*/imageformats/*|*/iconengines/*|*/styles/*)
+      echo "BROKEN: ${plugin#$APP/} needs $(echo "$MISS" | tr '\n' ' ')" >&2
+      echo "That plugin is required. Refusing to ship this bundle." >&2
+      exit 1
+      ;;
+  esac
+  echo "pruned ${plugin#$APP/Contents/} (unused, needs $(echo "$MISS" | tr '\n' ' '))"
+  rm -f "$plugin"
+  PRUNED=$((PRUNED + 1))
+done
+
+# Whatever pointed at those, and anything else macdeployqt left hanging.
+DANGLING=0
+for link in $(find "$APP" -type l 2>/dev/null); do
+  [ -e "$link" ] && continue
+  echo "pruned ${link#$APP/Contents/} (dangling link)"
+  rm -f "$link"
+  DANGLING=$((DANGLING + 1))
+done
+
+# Now assert the property that actually decides whether this runs on another
+# Mac. macdeployqt's exit code has never been evidence of that: it printed
+# $DEPLOY_ERRORS ERROR lines and still exited 0. The gate is the artifact.
+# `set -e` turns a non-zero verdict into a failed bundle, before signing.
+"$ROOT/bin/verify-bundle" "$APP" || {
+  echo "Not signing it. macdeployqt log: $LOG" >&2
+  exit 1
+}
+
+# Signing goes last: pruning changed the bundle, and arm64 refuses to run a
+# binary whose signature no longer matches its load commands.
 codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 
 echo "Bundled $APP"
+echo "  macdeployqt errors: $DEPLOY_ERRORS (log: $LOG)"
+echo "  plugins pruned:     $PRUNED"
+echo "  dangling links cut: $DANGLING"
+echo "  external deps left: 0"
 echo "Install it with: cp -R $APP /Applications/"

@@ -1,0 +1,63 @@
+#!/usr/bin/env sh
+# Assert the property that decides whether a bundled .app runs on someone else's
+# Mac: nothing inside it depends on anything outside it, apart from the OS.
+#
+# This exists because macdeployqt's exit code is not evidence. It printed 66
+# ERROR lines about frameworks it could not resolve and still exited 0, which
+# means a bundle with broken plugins inside it passed as a success and nobody
+# would have found out until the app refused to start somewhere else.
+#
+#   ./bin/verify-bundle build/omacut.app
+#
+# Exits 0 when the bundle is self-contained, non-zero with one line per problem.
+set -eu
+
+APP="${1:-}"
+[ -n "$APP" ] || { echo "usage: verify-bundle <path/to/App.app>" >&2; exit 2; }
+[ -d "$APP" ] || { echo "No such bundle: $APP" >&2; exit 2; }
+APP="$(CDPATH= cd -- "$APP" && pwd)"
+FW="$APP/Contents/Frameworks"
+
+BAD=0
+
+# A link to a file that is gone is both a runtime hazard and the thing that makes
+# codesign fail with a bare "No such file or directory" naming the bundle.
+for link in $(find "$APP" -type l 2>/dev/null); do
+  [ -e "$link" ] || { echo "DANGLING: ${link#$APP/}"; BAD=$((BAD + 1)); }
+done
+
+for m in $(find "$APP" -type f -print); do
+  case "$(file -b "$m" 2>/dev/null)" in
+    *Mach-O*) ;;
+    *) continue ;;
+  esac
+  # otool -L line 1 is the filename. Line 2 is a dylib's own install id, which is
+  # not a dependency, but for a plain executable it already is one.
+  case "$m" in
+    "$APP/Contents/MacOS/"*) SKIP=2 ;;
+    *) SKIP=3 ;;
+  esac
+
+  for dep in $(otool -L "$m" 2>/dev/null | tail -n +"$SKIP" | awk '{print $1}'); do
+    # macdeployqt rewrites most references to @executable_path/../Frameworks/...,
+    # so waving that form through unchecked would let a deleted framework pass
+    # verification. Every relative form is resolved to a real path and stat'ed.
+    case "$dep" in
+      @rpath/*)           TARGET="$FW/${dep#@rpath/}" ;;
+      @executable_path/*) TARGET="$APP/Contents/MacOS/${dep#@executable_path/}" ;;
+      @loader_path/*)     TARGET="$(dirname "$m")/${dep#@loader_path/}" ;;
+      /usr/lib/*|/System/Library/*) continue ;;
+      /*) echo "OUTSIDE: ${m#$APP/} -> $dep"; BAD=$((BAD + 1)); continue ;;
+      *) continue ;;
+    esac
+    [ -e "$TARGET" ] || { echo "UNRESOLVED: ${m#$APP/} -> $dep"; BAD=$((BAD + 1)); }
+  done
+done
+
+if [ "$BAD" -ne 0 ]; then
+  echo "$BAD problem(s). This bundle would fail to launch on a Mac without the" >&2
+  echo "libraries it is pointing at. Do not ship it." >&2
+  exit 1
+fi
+
+echo "verify-bundle: $APP is self-contained"

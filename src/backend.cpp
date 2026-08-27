@@ -11,7 +11,11 @@
 #include <memory>
 
 #include "filepicker.h"
+#ifdef Q_OS_LINUX
 #include "portalfilepicker.h"
+#else
+#include "nativefilepicker.h"
+#endif
 #include "thumbprovider.h"
 #include "thumbworker.h"
 
@@ -44,10 +48,20 @@ bool replaceWithTemp(const QString &tmpPath, const QString &outPath) {
     const QByteArray outName = QFile::encodeName(outPath);
     return std::rename(tmpName.constData(), outName.constData()) == 0;
 }
+
+// The file dialogs a platform actually has: the xdg-desktop-portal on Linux,
+// the system's own panels everywhere else.
+FilePicker *defaultFilePicker() {
+#ifdef Q_OS_LINUX
+    return new PortalFilePicker();
+#else
+    return new NativeFilePicker();
+#endif
+}
 }
 
 Backend::Backend(ThumbProvider *provider, QObject *parent)
-    : Backend(provider, new PortalFilePicker(), parent) {}
+    : Backend(provider, defaultFilePicker(), parent) {}
 
 Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, QObject *parent)
     : QObject(parent), m_provider(provider), m_filePicker(filePicker),

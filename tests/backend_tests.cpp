@@ -18,6 +18,9 @@
 #include "filepicker.h"
 #include "thumbprovider.h"
 #include "thumbworker.h"
+#ifndef Q_OS_LINUX
+#include "nativefilepicker.h"
+#endif
 
 class FakeFilePicker : public FilePicker {
     Q_OBJECT
@@ -199,6 +202,9 @@ private slots:
     void exportHeightsNeverUpscale();
     void themeAccentReadsOmarchyColors();
     void themeAccentForegroundKeepsContrast();
+#ifndef Q_OS_LINUX
+    void nativeExportFiltersCarryTheQualityChoice();
+#endif
 
 private:
     QUrl videoUrl() const { return QUrl::fromLocalFile(m_videoPath); }
@@ -931,6 +937,33 @@ void BackendTests::themeAccentForegroundKeepsContrast() {
     QCOMPARE(Backend::foregroundFor(QStringLiteral("#222266")), QStringLiteral("white"));
     QCOMPARE(Backend::foregroundFor(QStringLiteral("garbage")), QStringLiteral("black"));
 }
+
+#ifndef Q_OS_LINUX
+// The portal picker gets a real "Quality" combo; the native one has to smuggle
+// the same choice through the save panel's file-format popup. What matters is
+// that every offer round-trips back to the scale height Backend expects.
+void BackendTests::nativeExportFiltersCarryTheQualityChoice() {
+    const QStringList none = NativeFilePicker::exportNameFilters({});
+    QCOMPARE(none.size(), 1);
+    QCOMPARE(NativeFilePicker::scaleHeightForFilter(none.first()), 0);
+
+    const QStringList offers = NativeFilePicker::exportNameFilters({1080, 720});
+    QCOMPARE(offers.size(), 3);
+    // Original stays first, so the default selection never downscales.
+    QCOMPARE(NativeFilePicker::scaleHeightForFilter(offers.at(0)), 0);
+    QCOMPARE(NativeFilePicker::scaleHeightForFilter(offers.at(1)), 1080);
+    QCOMPARE(NativeFilePicker::scaleHeightForFilter(offers.at(2)), 720);
+
+    // The container is fixed no matter which quality is picked.
+    for (const QString &offer : offers)
+        QVERIFY2(offer.contains(QStringLiteral("(*.mp4)")), qPrintable(offer));
+
+    // Anything unrecognised means "don't downscale", the same answer the portal
+    // picker gives when no choice comes back at all.
+    QCOMPARE(NativeFilePicker::scaleHeightForFilter(QStringLiteral("Whatever (*.mp4)")), 0);
+    QCOMPARE(NativeFilePicker::scaleHeightForFilter(QString()), 0);
+}
+#endif
 
 QTEST_MAIN(BackendTests)
 #include "backend_tests.moc"

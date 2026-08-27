@@ -202,6 +202,7 @@ private slots:
     void trimArgsScaleTheShorterSide();
     void exportHeightsNeverUpscale();
     void exportClipNeverUpscalesWhenAskedDirectly();
+    void exportClipCapsTheShorterSideInBothOrientations_data();
     void exportClipCapsTheShorterSideInBothOrientations();
     void exportOriginalCopiesStreamsAndKeepsTheFrameExactly();
     void exportFallsBackToReencodeWhenTheCopyWillNotMux();
@@ -1106,72 +1107,88 @@ void BackendTests::exportClipNeverUpscalesWhenAskedDirectly() {
 // unconditionally and expected a 720x1280 clip asked for 1080p to come back
 // around 405x720. It comes back 720x1280. The premise was wrong, but nothing in
 // the suite said so, and Marcin shoots vertical on a phone.
+void BackendTests::exportClipCapsTheShorterSideInBothOrientations_data() {
+    QTest::addColumn<int>("srcW");
+    QTest::addColumn<int>("srcH");
+    QTest::addColumn<int>("asked");
+    QTest::addColumn<int>("wantW");
+    QTest::addColumn<int>("wantH");
+
+    // Landscape and portrait, above the shorter side (must not change) and
+    // below it (must scale, transposed). The fixture every other test uses is
+    // square, so gt(iw,ih) is always false there and only one branch of the
+    // filter was ever exercised - swapping the two branches used to pass the
+    // whole suite.
+    QTest::addRow("landscape 64x32 asked 48") << 64 << 32 << 48 << 64 << 32;
+    QTest::addRow("landscape 64x32 asked 16") << 64 << 32 << 16 << 32 << 16;
+    QTest::addRow("portrait 32x64 asked 48") << 32 << 64 << 48 << 32 << 64;
+    QTest::addRow("portrait 32x64 asked 16") << 32 << 64 << 16 << 16 << 32;
+
+    // Odd sources come back EVEN on this path, never odd and never rounded up.
+    // libx264 refuses an odd frame when the output lands in 4:2:0 - a 1280x719
+    // source asked for 720p exited 187 and wrote no file - and rounding up
+    // would be an upscale for a request that asked for less. Preserving an odd
+    // frame exactly is Original's job, and Original copies the streams instead
+    // of coming through here.
+    QTest::addRow("odd square 33x33 asked 720") << 33 << 33 << 720 << 32 << 32;
+    QTest::addRow("odd landscape 65x33 asked 720") << 65 << 33 << 720 << 64 << 32;
+    QTest::addRow("odd portrait 33x65 asked 720") << 33 << 65 << 720 << 32 << 64;
+    QTest::addRow("odd landscape 65x33 asked 16") << 65 << 33 << 16 << 30 << 16;
+
+    // Smaller than any quality the dialog would ever offer.
+    QTest::addRow("tiny 16x10 asked 720") << 16 << 10 << 720 << 16 << 10;
+
+    // The min() boundary: asked for exactly the shorter side. Round 1's
+    // "correctly did not upscale" evidence was this input, and it passed while
+    // proving nothing, so it is pinned deliberately rather than hit by luck.
+    QTest::addRow("boundary even 64x32 asked 32") << 64 << 32 << 32 << 64 << 32;
+    QTest::addRow("boundary odd 65x33 asked 33") << 65 << 33 << 33 << 64 << 32;
+
+    // The pair an independent verifier reported, one pixel apart and with
+    // completely different outcomes. The second is the file libx264 refused.
+    QTest::addRow("odd short side 1280x721 asked 720") << 1280 << 721 << 720 << 1278 << 720;
+    QTest::addRow("odd short side 1280x719 asked 720") << 1280 << 719 << 720 << 1280 << 718;
+}
+
+// One row per shape, so a failure names the shape that failed and does not hide
+// the rows behind it, and adding a shape is one addRow rather than another
+// branch in a loop.
 void BackendTests::exportClipCapsTheShorterSideInBothOrientations() {
-    struct Case {
-        const char *name;
-        int srcW;
-        int srcH;
-        int asked;
-        int wantW;
-        int wantH;
-    };
-    static const Case cases[] = {
-        // Landscape, short side 32.
-        {"land-noupscale.mp4", 64, 32, 48, 64, 32},
-        {"land-downscale.mp4", 64, 32, 16, 32, 16},
-        // Portrait, short side 32. Same numbers, transposed.
-        {"port-noupscale.mp4", 32, 64, 48, 32, 64},
-        {"port-downscale.mp4", 32, 64, 16, 16, 32},
-        // Odd sources on the re-encode path come back EVEN, never odd and never
-        // rounded up. libx264 refuses an odd frame outright - a 1280x719 source
-        // asked for 720p used to exit 187 and write no file at all - and
-        // rounding up would be an upscale for a request that asked for less.
-        // Preserving an odd frame exactly is Original's job now, and Original
-        // copies the streams instead of coming through here.
-        {"odd-square.mp4", 33, 33, 720, 32, 32},
-        {"odd-land.mp4", 65, 33, 720, 64, 32},
-        {"odd-port.mp4", 33, 65, 720, 32, 64},
-        // ...and an odd source that really is downscaled still lands on even.
-        {"odd-land-downscale.mp4", 65, 33, 16, 30, 16},
-        // A source smaller than any quality the dialog would ever offer.
-        {"tiny-noupscale.mp4", 16, 10, 720, 16, 10},
-        // The min() boundary: asked for exactly the shorter side. Round 1's
-        // "correctly did not upscale" evidence was this input, and it passed
-        // while proving nothing, so it is worth pinning deliberately rather
-        // than hitting it by luck.
-        {"boundary-even.mp4", 64, 32, 32, 64, 32},
-        {"boundary-odd.mp4", 65, 33, 33, 64, 32},
-        // The pair an independent verifier reported: an odd shorter side either
-        // side of the asked height. The second one is the file libx264 refused.
-        {"odd-short-above.mp4", 1280, 721, 720, 1278, 720},
-        {"odd-short-below.mp4", 1280, 719, 720, 1280, 718},
-    };
+    QFETCH(int, srcW);
+    QFETCH(int, srcH);
+    QFETCH(int, asked);
+    QFETCH(int, wantW);
+    QFETCH(int, wantH);
 
-    for (const Case &c : cases) {
-        const QString src = makeVideo(QStringLiteral("src-%1x%2.mp4").arg(c.srcW).arg(c.srcH),
-                                      c.srcW, c.srcH);
-        QVERIFY2(!src.isEmpty(), c.name);
+    const QString src = makeVideo(QStringLiteral("src-%1x%2.mp4").arg(srcW).arg(srcH), srcW, srcH);
+    QVERIFY2(!src.isEmpty(), "fixture could not be built at the size asked for");
 
-        ThumbProvider provider;
-        Backend backend(&provider, new FakeFilePicker);
-        QSignalSpy doneSpy(&backend, &Backend::exportDone);
-        QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+    // Assert what was actually produced, not what was requested. testsrc keeps
+    // an odd size and testsrc2 silently rounds it, so a generator swap would
+    // otherwise leave every odd-dimension row green while testing nothing.
+    const ffmpeg::VideoInfo srcInfo = ffmpeg::probe(src);
+    QVERIFY2(srcInfo.ok, qPrintable(srcInfo.error));
+    QCOMPARE(srcInfo.width, srcW);
+    QCOMPARE(srcInfo.height, srcH);
 
-        QVERIFY(backend.load(QUrl::fromLocalFile(src)));
-        waitForBackgroundWork(backend);
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
 
-        const QString out = m_dir.filePath(QString::fromUtf8(c.name));
-        backend.exportClip(QUrl::fromLocalFile(out), 0.0, 1.0, c.asked);
-        QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 20000);
-        QVERIFY2(failedSpy.isEmpty(), c.name);
+    QVERIFY(backend.load(QUrl::fromLocalFile(src)));
+    waitForBackgroundWork(backend);
 
-        const ffmpeg::VideoInfo info = ffmpeg::probe(out);
-        QVERIFY2(info.ok, qPrintable(QString("%1: %2").arg(c.name, info.error)));
-        QVERIFY2(info.width == c.wantW && info.height == c.wantH,
-                 qPrintable(QString("%1: %2x%3 source asked %4, got %5x%6, wanted %7x%8")
-                                .arg(c.name).arg(c.srcW).arg(c.srcH).arg(c.asked)
-                                .arg(info.width).arg(info.height).arg(c.wantW).arg(c.wantH)));
-    }
+    const QString out = m_dir.filePath(QStringLiteral("capped-%1x%2-%3.mp4")
+                                           .arg(srcW).arg(srcH).arg(asked));
+    backend.exportClip(QUrl::fromLocalFile(out), 0.0, 1.0, asked);
+    QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 30000);
+    QVERIFY(failedSpy.isEmpty());
+
+    const ffmpeg::VideoInfo info = ffmpeg::probe(out);
+    QVERIFY2(info.ok, qPrintable(info.error));
+    QCOMPARE(info.width, wantW);
+    QCOMPARE(info.height, wantH);
 }
 
 // Original is a length cut and nothing else. It copies the streams, so the frame

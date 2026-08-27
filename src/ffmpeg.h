@@ -31,6 +31,11 @@ QImage thumbnail(const QString &path, double time, int height = 90,
 // Cuts are frame-accurate and re-encoded with libx264/aac. A non-zero
 // scaleHeight downscales so the shorter side becomes scaleHeight (1080p of a
 // portrait video is 1080 wide), always preserving the aspect ratio.
+//
+// Downscale only: a scaleHeight above the source's shorter side leaves the frame
+// alone rather than blowing it up, and a clip with no length gives back an empty
+// list. Both limits live here rather than in the callers, so there is no route
+// to an upscaled or empty export.
 QStringList trimArgs(const QString &src, const QString &dst, double start, double end,
                      int scaleHeight = 0);
 

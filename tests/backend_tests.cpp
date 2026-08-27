@@ -201,6 +201,8 @@ private slots:
     void trimArgsReencodeForPreciseCuts();
     void trimArgsScaleTheShorterSide();
     void exportHeightsNeverUpscale();
+    void exportClipNeverUpscalesWhenAskedDirectly();
+    void trimArgsRefuseAClipWithNoLength();
     void themeAccentReadsOmarchyColors();
     void themeAccentForegroundKeepsContrast();
 #ifndef Q_OS_LINUX
@@ -890,8 +892,11 @@ void BackendTests::trimArgsScaleTheShorterSide() {
                                               0.0, 1.0, 1080);
     const int vfAt = args.indexOf(QStringLiteral("-vf"));
     QVERIFY(vfAt >= 0);
+    // The cap is min(asked, shorter side) rather than the asked height, which is
+    // what stops it upscaling for a caller that never consulted exportHeights.
     QCOMPARE(args.value(vfAt + 1),
-             QStringLiteral("scale='if(gt(iw,ih),-2,1080)':'if(gt(iw,ih),1080,-2)'"));
+             QStringLiteral("scale='if(gt(iw,ih),-2,min(1080,min(iw,ih)))'"
+                            ":'if(gt(iw,ih),min(1080,min(iw,ih)),-2)'"));
 }
 
 void BackendTests::exportHeightsNeverUpscale() {
@@ -992,6 +997,69 @@ void BackendTests::toolPathSurvivesTheLaunchdPath() {
     QVERIFY(ffmpeg::toolPath(QStringLiteral("omacut-no-such-tool")).isEmpty());
 }
 #endif
+
+// exportHeightsNeverUpscale covers the list the export dialog OFFERS. That is
+// not the same as what exportClip ACCEPTS, and the difference is a real bug that
+// an independent verifier hit: calling exportClip directly with 1080 on a 720p
+// source walked straight past the offer list and blew the frame up. So this test
+// takes that route deliberately - no dialog, no exportHeights - and reads the
+// dimensions back off the file.
+//
+// The second half is the positive control. Without it, a build where scaling had
+// stopped working altogether would pass the "never upscales" half perfectly.
+void BackendTests::exportClipNeverUpscalesWhenAskedDirectly() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+
+    QVERIFY(backend.load(videoUrl()));
+    waitForBackgroundWork(backend);
+
+    // The fixture is 32x32, so 720 is an upscale by any reading.
+    const QString upPath = m_dir.filePath(QStringLiteral("upscale-attempt.mp4"));
+    backend.exportClip(QUrl::fromLocalFile(upPath), 0.0, 1.0, 720);
+    QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 20000);
+    QCOMPARE(failedSpy.count(), 0);
+    QVERIFY(QFileInfo::exists(upPath));
+
+    const ffmpeg::VideoInfo upInfo = ffmpeg::probe(upPath);
+    QVERIFY2(upInfo.ok, qPrintable(upInfo.error));
+    QCOMPARE(upInfo.width, 32);
+    QCOMPARE(upInfo.height, 32);
+
+    doneSpy.clear();
+    failedSpy.clear();
+
+    // ...and a genuine downscale still downscales.
+    const QString downPath = m_dir.filePath(QStringLiteral("downscale.mp4"));
+    backend.exportClip(QUrl::fromLocalFile(downPath), 0.0, 1.0, 16);
+    QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 20000);
+    QCOMPARE(failedSpy.count(), 0);
+
+    const ffmpeg::VideoInfo downInfo = ffmpeg::probe(downPath);
+    QVERIFY2(downInfo.ok, qPrintable(downInfo.error));
+    QCOMPARE(downInfo.width, 16);
+    QCOMPARE(downInfo.height, 16);
+}
+
+// Same shape of problem as the upscale one: Backend::exportClip checks the
+// length, but trimArgs used to clamp to -t 0 and hand ffmpeg a command that
+// writes an empty MP4. The refusal belongs at the bottom, where no caller can
+// step over it.
+void BackendTests::trimArgsRefuseAClipWithNoLength() {
+    const QString src = QStringLiteral("/tmp/in.mp4");
+    const QString dst = QStringLiteral("/tmp/out.mp4");
+
+    QVERIFY(ffmpeg::trimArgs(src, dst, 2.0, 2.0).isEmpty());
+    QVERIFY(ffmpeg::trimArgs(src, dst, 5.0, 1.0).isEmpty());
+
+    // The positive control: a clip with length still produces a command, and it
+    // still carries the length it was asked for.
+    const QStringList args = ffmpeg::trimArgs(src, dst, 2.0, 5.5);
+    QVERIFY(!args.isEmpty());
+    QVERIFY(args.contains(QStringLiteral("3.500")));
+}
 
 QTEST_MAIN(BackendTests)
 #include "backend_tests.moc"

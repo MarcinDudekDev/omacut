@@ -142,6 +142,12 @@ QImage thumbnail(const QString &path, double time, int height,
 
 QStringList trimArgs(const QString &src, const QString &dst, double start, double end,
                      int scaleHeight) {
+    // A clip with no length is not a clip. Refusing here rather than clamping to
+    // -t 0 means a caller that skipped Backend's own check gets no command at
+    // all, instead of a valid MP4 containing nothing.
+    if (end - start <= 0.0)
+        return {};
+
     // Machine-readable progress on stdout (errors stay on stderr), so the UI
     // can show how far along the encode is.
     QStringList args = {"-y", "-loglevel", "error", "-progress", "pipe:1"};
@@ -150,13 +156,23 @@ QStringList trimArgs(const QString &src, const QString &dst, double start, doubl
     // downloading.
     args << "-ss" << QString::number(start, 'f', 3)
          << "-i" << src
-         << "-t" << QString::number(qMax(end - start, 0.0), 'f', 3);
+         << "-t" << QString::number(end - start, 'f', 3);
     // Cap the shorter side, judged on the decoded (rotation-applied) frame, so
     // portrait and landscape both keep their aspect ratio. -2 keeps the other
     // side divisible by two, which libx264 requires.
-    if (scaleHeight > 0)
+    //
+    // The target is min(asked, min(iw,ih)) rather than the asked height, so this
+    // can never upscale no matter what the caller passes. Backend::exportHeights
+    // only offers heights below the source's shorter side, but that governs what
+    // the dialog shows, not what exportClip accepts — asking exportClip for 1080p
+    // on a 720p source used to blow it up to 1080. Expressing the limit inside
+    // the filter keeps it true for every caller, and needs no source dimensions
+    // passed down here to be right.
+    if (scaleHeight > 0) {
+        const QString target = QString("min(%1,min(iw,ih))").arg(scaleHeight);
         args << "-vf"
-             << QString("scale='if(gt(iw,ih),-2,%1)':'if(gt(iw,ih),%1,-2)'").arg(scaleHeight);
+             << QString("scale='if(gt(iw,ih),-2,%1)':'if(gt(iw,ih),%1,-2)'").arg(target);
+    }
     args << "-c:v" << "libx264" << "-preset" << "veryfast"
          << "-crf" << "18" << "-c:a" << "aac"
          << "-movflags" << "+faststart"

@@ -362,6 +362,15 @@ void Backend::exportClip(const QUrl &dst, double start, double end, int scaleHei
     const QString tmpPath = outPath + QStringLiteral(".omacut-part.mp4");
     QFile::remove(tmpPath);
     const QStringList args = ffmpeg::trimArgs(m_path, tmpPath, start, end, scaleHeight);
+    // trimArgs refuses a clip with no length. The check above already caught
+    // that, so this is the belt to its braces: never hand ffmpeg an empty
+    // argument list and let it read stdin instead.
+    if (args.isEmpty()) {
+        setBusy(false);
+        setStatus(QString());
+        emit exportFailed("The selected clip has no length.");
+        return;
+    }
 
     auto *proc = new QProcess(this);
     auto completed = std::make_shared<bool>(false);

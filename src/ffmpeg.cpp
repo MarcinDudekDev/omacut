@@ -53,7 +53,6 @@ VideoInfo probe(const QString &path) {
         "-print_format", "json",
         "-show_format",
         "-show_streams",
-        "-select_streams", "v:0",
         path,
     });
     if (!proc.waitForFinished(kProbeTimeoutMs)) {
@@ -78,7 +77,21 @@ VideoInfo probe(const QString &path) {
         return info;
     }
 
-    const QJsonObject stream = streams.first().toObject();
+    QJsonObject stream;
+    for (const QJsonValue &value : streams) {
+        const QJsonObject candidate = value.toObject();
+        const QString type = candidate.value("codec_type").toString();
+        if (type == "video" && stream.isEmpty()) {
+            stream = candidate;
+            info.videoCodec = candidate.value("codec_name").toString();
+        } else if (type == "audio" && info.audioCodec.isEmpty()) {
+            info.audioCodec = candidate.value("codec_name").toString();
+        }
+    }
+    if (stream.isEmpty()) {
+        info.error = "No video stream found in this file.";
+        return info;
+    }
 
     info.width = stream.value("width").toInt();
     info.height = stream.value("height").toInt();
@@ -140,8 +153,18 @@ QImage thumbnail(const QString &path, double time, int height,
     return img;
 }
 
+CopyPlan copyPlanFor(const VideoInfo &info) {
+    static const QStringList videoOk{"h264", "mpeg4", "mjpeg"};
+    static const QStringList audioOk{"aac"};
+    CopyPlan plan;
+    plan.video = videoOk.contains(info.videoCodec);
+    // No audio at all is not a reason to re-encode the file.
+    plan.audio = info.audioCodec.isEmpty() || audioOk.contains(info.audioCodec);
+    return plan;
+}
+
 QStringList trimArgs(const QString &src, const QString &dst, double start, double end,
-                     int scaleHeight) {
+                     int scaleHeight, CopyPlan copy) {
     // A clip with no length is not a clip. Refusing here rather than clamping to
     // -t 0 means a caller that skipped Backend's own check gets no command at
     // all, instead of a valid MP4 containing nothing.
@@ -184,8 +207,32 @@ QStringList trimArgs(const QString &src, const QString &dst, double start, doubl
     // records where the cut was meant to be, so the damage can be neither
     // detected nor undone. It is a one-way door, which is why it is written
     // down here and in the README rather than left for someone to rediscover.
-    if (scaleHeight <= 0) {
-        args << "-c" << "copy" << "-movflags" << "+faststart" << dst;
+    // Without an explicit map, ffmpeg picks ONE stream of each kind, so a source
+    // with two audio tracks came out with one - a silent loss on the path whose
+    // whole claim is that it changes nothing. The first video stream and EVERY
+    // audio stream, then. Not "everything": a subrip track cannot go into MP4 at
+    // all and would fail the mux, and a cover-art still counts as a second video
+    // stream. Subtitles are dropped, which the README says.
+    args << "-map" << "0:v:0" << "-map" << "0:a?";
+
+    // Video can only be copied when nothing is being resized AND the codec is on
+    // the measured list; audio is decided on its own, so an H.264 file with MP3
+    // audio keeps its video untouched and gains an AAC track a Mac can hear.
+    const bool copyVideo = scaleHeight <= 0 && copy.video;
+    args << "-c:v" << (copyVideo ? "copy" : "libx264");
+    if (!copyVideo) {
+        // -pix_fmt is not optional. libx264 keeps whatever chroma the source
+        // decoded to, and AVFoundation cannot play High 4:4:4 Predictive at all:
+        // a VP9 source re-encoded without this came out as h264+aac and
+        // QuickTime still refused it. 4:2:0 is also what makes the even-frame
+        // rule absolute rather than conditional, since 4:2:0 cannot represent an
+        // odd side.
+        args << "-preset" << "veryfast" << "-crf" << "18"
+             << "-pix_fmt" << "yuv420p";
+    }
+    args << "-c:a" << (copy.audio ? "copy" : "aac");
+    if (copyVideo) {
+        args << "-movflags" << "+faststart" << dst;
         return args;
     }
 
@@ -213,18 +260,19 @@ QStringList trimArgs(const QString &src, const QString &dst, double start, doubl
     // and 4:2:0 is what nearly all real footage encodes to. Flooring both sides
     // to even removes the condition rather than betting on it. Floored to at
     // least 2 as well, because on a tiny source the rounding reaches zero.
-    const QString shortSide = QStringLiteral("min(iw,ih)");
-    const QString target = QStringLiteral("min(%1,%2)").arg(scaleHeight).arg(shortSide);
-    const auto sideExpr = [&](const QString &side) {
-        return QStringLiteral("max(2,2*floor(%3*%1/%2/2))").arg(target, shortSide, side);
-    };
-    args << "-vf"
-         << QStringLiteral("scale='%1':'%2'")
-                .arg(sideExpr(QStringLiteral("iw")), sideExpr(QStringLiteral("ih")));
-    args << "-c:v" << "libx264" << "-preset" << "veryfast"
-         << "-crf" << "18" << "-c:a" << "aac"
-         << "-movflags" << "+faststart"
-         << dst;
+    // No size asked for means no filter: re-encode the frame as it is.
+    if (scaleHeight > 0) {
+        const QString shortSide = QStringLiteral("min(iw,ih)");
+        const QString target = QStringLiteral("min(%1,%2)").arg(scaleHeight).arg(shortSide);
+        const auto sideExpr = [&](const QString &side) {
+            return QStringLiteral("max(2,2*floor(%3*%1/%2/2))").arg(target, shortSide, side);
+        };
+        args << "-vf"
+             << QStringLiteral("scale='%1':'%2'")
+                    .arg(sideExpr(QStringLiteral("iw")), sideExpr(QStringLiteral("ih")));
+    }
+
+    args << "-movflags" << "+faststart" << dst;
     return args;
 }
 

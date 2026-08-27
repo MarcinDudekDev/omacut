@@ -42,6 +42,10 @@ Exports are always written as MP4 files, regardless of the input video's contain
 
 The codec is whatever the source had. A VP9 WebM comes out as VP9 in an MP4 container rather than H.264. For anything recorded with OBS, a phone or a camera that is H.264 already, so nothing changes; it is downloaded WebM that comes out differently. If the MP4 container will not carry the source codec at all — FLV1, for instance — the export re-encodes instead of failing, and says so once.
 
+Copying only happens for formats a Mac will actually open, judged by loading the result with AVFoundation rather than by whether ffmpeg accepted the mux: H.264, MPEG-4 Part 2 and MJPEG video, AAC audio. Anything else is re-encoded, per stream — an H.264 file with MP3 audio keeps its video untouched and gets a new AAC track, because MP3 in an MP4 mixes fine and then is simply not there as far as macOS is concerned. Codecs join that list when a test for them is green, not because they ought to work.
+
+Every audio track comes across, not just the first. Subtitle tracks do not: MP4 will not carry a SubRip stream, and failing the export over one would be worse than dropping it.
+
 A copy can only begin on a keyframe. The clip you get is still the one you asked for, because the timing is carried in an **MP4 edit list**, but the file physically holds everything back to the previous keyframe. On long-GOP sources that is several seconds of hidden lead-in and a noticeably larger file.
 
 > **Do not strip the edit list "for compatibility".** It is the only record that the leading GOP is not part of the clip. Everything that reads through ffmpeg honours it, remuxes and re-encodes included, so the cut survives an upload pipeline. A tool that ignores it on remux emits the whole span starting at the keyframe and writes no `elst` — and then the intent is gone, so the damage can be neither detected nor undone. It is a one-way door.

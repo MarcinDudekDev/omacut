@@ -369,13 +369,20 @@ void Backend::exportClip(const QUrl &dst, double start, double end, int scaleHei
     // carry. That is not a reason to hand back an error: the user asked for a
     // clip, so fall back to a re-encode and say so afterwards in one sentence.
     m_reencodedAfterCopyFailed = false;
-    runTrim(outPath, tmpPath, start, end, scaleHeight, scaleHeight <= 0);
+    const ffmpeg::CopyPlan plan = ffmpeg::copyPlanFor(m_info);
+    // Only a copy attempt has anything to fall back FROM.
+    // A re-encode always goes through the scale filter, even when no size was
+    // asked for, because that is what floors an odd frame to even. Without it a
+    // 1280x719 source would be refused by libx264 all over again.
+    const int effective = (scaleHeight > 0) ? scaleHeight
+                        : (plan.video ? 0 : kReencodeAtSourceSize);
+    runTrim(outPath, tmpPath, start, end, effective, scaleHeight <= 0 && plan.video, plan);
 }
 
 void Backend::runTrim(const QString &outPath, const QString &tmpPath, double start, double end,
-                      int scaleHeight, bool allowReencodeFallback) {
+                      int scaleHeight, bool allowReencodeFallback, ffmpeg::CopyPlan copy) {
     const QString ffmpegBin = ffmpeg::toolPath("ffmpeg");
-    const QStringList args = ffmpeg::trimArgs(m_path, tmpPath, start, end, scaleHeight);
+    const QStringList args = ffmpeg::trimArgs(m_path, tmpPath, start, end, scaleHeight, copy);
     // trimArgs refuses a clip with no length. exportClip already caught that, so
     // this is the belt to its braces: never hand ffmpeg an empty argument list
     // and let it read stdin instead.
@@ -413,7 +420,7 @@ void Backend::runTrim(const QString &outPath, const QString &tmpPath, double sta
             });
 
     connect(proc, &QProcess::finished, this,
-            [this, proc, outPath, tmpPath, start, end, completed, allowReencodeFallback](
+            [this, proc, outPath, tmpPath, start, end, completed, allowReencodeFallback, copy](
                 int code, QProcess::ExitStatus exitStatus) {
                 if (*completed)
                     return;
@@ -427,7 +434,7 @@ void Backend::runTrim(const QString &outPath, const QString &tmpPath, double sta
                         setStatus(QStringLiteral("Exporting 0%"));
                         // kReencodeAtSourceSize caps at the source's own shorter
                         // side, so this re-encodes without resizing anything.
-                        runTrim(outPath, tmpPath, start, end, kReencodeAtSourceSize, false);
+                        runTrim(outPath, tmpPath, start, end, kReencodeAtSourceSize, false, copy);
                         return;
                     }
                     failExport(tmpPath, err.isEmpty() ? QStringLiteral("ffmpeg trim failed.") : err);

@@ -92,7 +92,7 @@ private:
     void setStatus(const QString &status);
     void failExport(const QString &tmpPath, const QString &message);
     void runTrim(const QString &outPath, const QString &tmpPath, double start, double end,
-                 int scaleHeight, bool allowReencodeFallback);
+                 int scaleHeight, bool allowReencodeFallback, ffmpeg::CopyPlan copy);
     void startThumbs();
     void stopThumbs();
     void revealNextThumb();

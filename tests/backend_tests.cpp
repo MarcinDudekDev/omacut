@@ -206,6 +206,11 @@ private slots:
     void exportClipCapsTheShorterSideInBothOrientations();
     void exportOriginalCopiesStreamsAndKeepsTheFrameExactly();
     void exportFallsBackToReencodeWhenTheCopyWillNotMux();
+    void copyPlanFollowsTheMeasuredList();
+    void exportOriginalHonoursTheCopyPlan_data();
+    void exportOriginalHonoursTheCopyPlan();
+    void exportDurationHoldsOnBothPaths_data();
+    void exportDurationHoldsOnBothPaths();
     void trimArgsRefuseAClipWithNoLength();
     void themeAccentReadsOmarchyColors();
     void themeAccentForegroundKeepsContrast();
@@ -909,7 +914,7 @@ void BackendTests::trimArgsReencodeForPreciseCuts() {
     // be lost and no encoder can refuse the frame size.
     const QStringList original = ffmpeg::trimArgs(QStringLiteral("in.mp4"),
                                                   QStringLiteral("out.mp4"),
-                                                  0.25, 0.75);
+                                                  0.25, 0.75, 0, {true, true});
     QVERIFY(original.contains(QStringLiteral("copy")));
     QVERIFY(!original.contains(QStringLiteral("libx264")));
     QVERIFY(original.contains(QStringLiteral("+faststart")));
@@ -921,6 +926,12 @@ void BackendTests::trimArgsReencodeForPreciseCuts() {
                                                 0.25, 0.75, 720);
     QVERIFY(scaled.contains(QStringLiteral("libx264")));
     QVERIFY(scaled.contains(QStringLiteral("aac")));
+    // Not cosmetic. libx264 keeps whatever chroma the source decoded to, and
+    // AVFoundation will not open High 4:4:4 Predictive: a VP9 source re-encoded
+    // without this came out as h264 + aac and QuickTime still refused it.
+    const int pixAt = scaled.indexOf(QStringLiteral("-pix_fmt"));
+    QVERIFY(pixAt >= 0);
+    QCOMPARE(scaled.value(pixAt + 1), QStringLiteral("yuv420p"));
     QVERIFY(scaled.contains(QStringLiteral("+faststart")));
     QVERIFY(!scaled.contains(QStringLiteral("copy")));
 
@@ -1253,8 +1264,10 @@ void BackendTests::exportFallsBackToReencodeWhenTheCopyWillNotMux() {
 
     QVERIFY2(failedSpy.isEmpty(), "a codec MP4 will not carry must not fail the export");
     QCOMPARE(doneSpy.count(), 1);
-    // ...and the user is told, once, why the file is not a copy of the source.
-    QCOMPARE(noticeSpy.count(), 1);
+    // FLV1 is not on the copy list, so this never attempts a copy at all: it is
+    // re-encoded from the start and there is nothing to announce. The notice is
+    // for the other case, where a copy was tried and the muxer refused it.
+    QCOMPARE(noticeSpy.count(), 0);
 
     const ffmpeg::VideoInfo info = ffmpeg::probe(out);
     QVERIFY2(info.ok, qPrintable(info.error));
@@ -1274,6 +1287,177 @@ void BackendTests::exportFallsBackToReencodeWhenTheCopyWillNotMux() {
     QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 30000);
     QVERIFY(failedSpy.isEmpty());
     QCOMPARE(copyNotice.count(), 0);
+}
+
+// The list is measurement, not opinion. Anything not measured is re-encoded,
+// including codecs that obviously "should" work - HEVC and ProRes are absent on
+// purpose, and this test is where someone will notice if they add one without a
+// fixture to back it.
+void BackendTests::copyPlanFollowsTheMeasuredList() {
+    const auto plan = [](const char *v, const char *a) {
+        ffmpeg::VideoInfo info;
+        info.videoCodec = QString::fromUtf8(v);
+        info.audioCodec = QString::fromUtf8(a);
+        return ffmpeg::copyPlanFor(info);
+    };
+
+    QVERIFY(plan("h264", "aac").video);
+    QVERIFY(plan("h264", "aac").audio);
+    QVERIFY(plan("mpeg4", "aac").video);
+    QVERIFY(plan("mjpeg", "aac").video);
+
+    // Per stream: H.264 video is fine, MP3 audio is not, and the file gets to
+    // keep its video untouched either way.
+    QVERIFY(plan("h264", "mp3").video);
+    QVERIFY(!plan("h264", "mp3").audio);
+
+    // AVFoundation will not open VP9 in an MP4 at all.
+    QVERIFY(!plan("vp9", "opus").video);
+    QVERIFY(!plan("vp9", "opus").audio);
+
+    // Unmeasured means re-encode, however plausible it looks.
+    QVERIFY(!plan("hevc", "aac").video);
+    QVERIFY(!plan("prores", "pcm_s16le").video);
+
+    // A file with no audio has no reason to force a re-encode.
+    QVERIFY(plan("h264", "").audio);
+}
+
+void BackendTests::exportOriginalHonoursTheCopyPlan_data() {
+    QTest::addColumn<QStringList>("encodeArgs");
+    QTest::addColumn<QString>("suffix");
+    QTest::addColumn<QString>("wantVideo");
+    QTest::addColumn<QString>("wantAudio");
+
+    QTest::addRow("h264 + aac stays as it is")
+        << QStringList{"-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"}
+        << QStringLiteral("mp4") << QStringLiteral("h264") << QStringLiteral("aac");
+    // Video copied, audio rebuilt: the MP3 track survives muxing and then does
+    // not exist as far as a Mac is concerned.
+    QTest::addRow("h264 + mp3 keeps video, re-encodes audio")
+        << QStringList{"-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "libmp3lame"}
+        << QStringLiteral("mkv") << QStringLiteral("h264") << QStringLiteral("aac");
+    // Neither stream is playable in an MP4, so both are rebuilt.
+    QTest::addRow("vp9 + opus is re-encoded whole")
+        << QStringList{"-c:v", "libvpx-vp9", "-b:v", "200k", "-c:a", "libopus"}
+        << QStringLiteral("webm") << QStringLiteral("h264") << QStringLiteral("aac");
+}
+
+void BackendTests::exportOriginalHonoursTheCopyPlan() {
+    QFETCH(QStringList, encodeArgs);
+    QFETCH(QString, suffix);
+    QFETCH(QString, wantVideo);
+    QFETCH(QString, wantAudio);
+
+    const QString ffmpegBin = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    QVERIFY(!ffmpegBin.isEmpty());
+    const QString src = m_dir.filePath(QStringLiteral("plan-%1.%2")
+                                           .arg(QString::fromUtf8(QTest::currentDataTag())
+                                                    .replace(' ', '-'), suffix));
+    QStringList make{"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                     "testsrc=size=64x48:rate=25:duration=3", "-f", "lavfi", "-i",
+                     "sine=frequency=440:duration=3", "-shortest"};
+    make += encodeArgs;
+    make << "-y" << src;
+    QProcess proc;
+    proc.start(ffmpegBin, make);
+    QVERIFY(proc.waitForFinished(60000));
+    if (proc.exitCode() != 0)
+        QSKIP("this ffmpeg cannot build that source");
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+    QVERIFY(backend.load(QUrl::fromLocalFile(src)));
+    waitForBackgroundWork(backend);
+
+    const QString out = m_dir.filePath(QStringLiteral("plan-out-%1.mp4")
+                                           .arg(QString::fromUtf8(QTest::currentDataTag())
+                                                    .replace(' ', '-')));
+    backend.exportClip(QUrl::fromLocalFile(out), 0.5, 2.0);
+    QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 60000);
+    QVERIFY(failedSpy.isEmpty());
+
+    const ffmpeg::VideoInfo info = ffmpeg::probe(out);
+    QVERIFY2(info.ok, qPrintable(info.error));
+    QCOMPARE(info.videoCodec, wantVideo);
+    QCOMPARE(info.audioCodec, wantAudio);
+}
+
+// The two export paths no longer deserve the same duration assertion, so they
+// no longer get one.
+//
+// A stream copy can only begin on a keyframe. ffmpeg covers that with an mp4
+// edit list, so the clip is the one that was asked for, but the presented
+// duration overshoots by a small whole number of frames. Measured, asking for
+// 2.000s:
+//
+//     24 fps   -> 2.125000   (+0.1250)      60 fps        -> 2.033333 (+0.0333)
+//     25 fps   -> 2.080000   (+0.0800)      30000/1001    -> 2.069733 (+0.0697)
+//     30 fps   -> 2.066667   (+0.0667)
+//
+// so the bound is 0.25s: double the worst seen, and still an order of magnitude
+// under the SECONDS of error a genuine keyframe snap would produce, which is the
+// thing this assertion exists to catch. DO NOT tighten it back to equality. It
+// was equality once, that claim is false for this path, and someone will
+// otherwise spend a day chasing a ghost.
+//
+// The re-encode path is near-exact and keeps a tight bound - but not equality
+// either, which is worth measuring rather than assuming: integer frame rates
+// give 2.000000 exactly, and 30000/1001 gives 2.002000. 0.01s is well inside a
+// single frame at any rate and would still catch a real regression.
+void BackendTests::exportDurationHoldsOnBothPaths_data() {
+    QTest::addColumn<QString>("rate");
+    QTest::addRow("24 fps") << QStringLiteral("24");
+    QTest::addRow("30 fps") << QStringLiteral("30");
+    QTest::addRow("29.97 fps") << QStringLiteral("30000/1001");
+}
+
+void BackendTests::exportDurationHoldsOnBothPaths() {
+    QFETCH(QString, rate);
+    const QString ffmpegBin = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    QVERIFY(!ffmpegBin.isEmpty());
+
+    const QString src = m_dir.filePath(QStringLiteral("rate-%1.mp4").arg(rate).replace('/', '_'));
+    QProcess make;
+    make.start(ffmpegBin, {QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"),
+                           QStringLiteral("error"), QStringLiteral("-f"), QStringLiteral("lavfi"),
+                           QStringLiteral("-i"),
+                           QStringLiteral("testsrc=size=64x48:rate=%1:duration=6").arg(rate),
+                           QStringLiteral("-g"), QStringLiteral("25"),
+                           QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+                           QStringLiteral("-y"), src});
+    QVERIFY(make.waitForFinished(30000));
+    QCOMPARE(make.exitCode(), 0);
+
+    const auto exportAndMeasure = [&](int scaleHeight, const QString &name) {
+        ThumbProvider provider;
+        Backend backend(&provider, new FakeFilePicker);
+        QSignalSpy doneSpy(&backend, &Backend::exportDone);
+        QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+        if (!backend.load(QUrl::fromLocalFile(src)))
+            return -1.0;
+        waitForBackgroundWork(backend);
+        const QString out = m_dir.filePath(name);
+        backend.exportClip(QUrl::fromLocalFile(out), 1.0, 3.0, scaleHeight);
+        bool finished = QTest::qWaitFor(
+            [&] { return doneSpy.count() + failedSpy.count() > 0; }, 30000);
+        if (!finished || !failedSpy.isEmpty())
+            return -1.0;
+        const ffmpeg::VideoInfo info = ffmpeg::probe(out);
+        return info.ok ? info.duration : -1.0;
+    };
+
+    const double copied = exportAndMeasure(0, QStringLiteral("dur-copy.mp4"));
+    QVERIFY2(copied > 0, "the stream copy did not produce a measurable file");
+    QVERIFY2(qAbs(copied - 2.0) <= 0.25,
+             qPrintable(QString("stream copy asked 2.000, got %1").arg(copied, 0, 'f', 6)));
+
+    const double reencoded = exportAndMeasure(24, QStringLiteral("dur-reencode.mp4"));
+    QVERIFY2(reencoded > 0, "the re-encode did not produce a measurable file");
+    QVERIFY2(qAbs(reencoded - 2.0) <= 0.01,
+             qPrintable(QString("re-encode asked 2.000, got %1").arg(reencoded, 0, 'f', 6)));
 }
 
 // Same shape of problem as the upscale one: Backend::exportClip checks the

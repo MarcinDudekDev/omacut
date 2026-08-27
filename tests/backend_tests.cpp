@@ -259,6 +259,11 @@ QString BackendTests::makeVideo(const QString &name, int width, int height) {
     if (ffmpeg.isEmpty())
         return {};
 
+    // 4:2:0 chroma cannot represent an odd side, and the odd sources are the
+    // whole point of some of these fixtures.
+    const bool odd = (width % 2) || (height % 2);
+    const QString pixFmt = odd ? QStringLiteral("yuv444p") : QStringLiteral("yuv420p");
+
     QProcess proc;
     proc.start(ffmpeg, {
         QStringLiteral("-hide_banner"),
@@ -266,7 +271,7 @@ QString BackendTests::makeVideo(const QString &name, int width, int height) {
         QStringLiteral("-f"), QStringLiteral("lavfi"),
         QStringLiteral("-i"),
         QStringLiteral("testsrc=size=%1x%2:rate=1:duration=1").arg(width).arg(height),
-        QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+        QStringLiteral("-pix_fmt"), pixFmt,
         QStringLiteral("-y"), path,
     });
     if (!proc.waitForFinished(20000) || proc.exitCode() != 0)
@@ -917,9 +922,13 @@ void BackendTests::trimArgsScaleTheShorterSide() {
     QVERIFY(vfAt >= 0);
     // The cap is min(asked, shorter side) rather than the asked height, which is
     // what stops it upscaling for a caller that never consulted exportHeights.
+    // Each side passes through unchanged when the target already equals the
+    // shorter side, so a request with nothing to do does nothing at all.
     QCOMPARE(args.value(vfAt + 1),
-             QStringLiteral("scale='if(gt(iw,ih),-2,min(1080,min(iw,ih)))'"
-                            ":'if(gt(iw,ih),min(1080,min(iw,ih)),-2)'"));
+             QStringLiteral("scale='if(eq(min(1080,min(iw,ih)),min(iw,ih)),iw,"
+                            "2*round(iw*min(1080,min(iw,ih))/min(iw,ih)/2))'"
+                            ":'if(eq(min(1080,min(iw,ih)),min(iw,ih)),ih,"
+                            "2*round(ih*min(1080,min(iw,ih))/min(iw,ih)/2))'"));
 }
 
 void BackendTests::exportHeightsNeverUpscale() {
@@ -1092,6 +1101,24 @@ void BackendTests::exportClipCapsTheShorterSideInBothOrientations() {
         // Portrait, short side 32. Same numbers, transposed.
         {"port-noupscale.mp4", 32, 64, 48, 32, 64},
         {"port-downscale.mp4", 32, 64, 16, 16, 32},
+        // Odd dimensions. ffmpeg's -2 "round to even" used to fire even when
+        // there was nothing to scale, so 33x33 asked for 720 came back 33x34
+        // and 65x33 came back 66x33. A request above the shorter side has to be
+        // a no-op, odd sides included.
+        {"odd-square-noupscale.mp4", 33, 33, 720, 33, 33},
+        {"odd-land-noupscale.mp4", 65, 33, 720, 65, 33},
+        {"odd-port-noupscale.mp4", 33, 65, 720, 33, 65},
+        // ...and an odd source that really is downscaled still lands on even
+        // sides, because libx264 will not take anything else.
+        {"odd-land-downscale.mp4", 65, 33, 16, 32, 16},
+        // A source smaller than any quality the dialog would ever offer.
+        {"tiny-noupscale.mp4", 16, 10, 720, 16, 10},
+        // The min() boundary: asked for exactly the shorter side. Round 1's
+        // "correctly did not upscale" evidence was this input, and it passed
+        // while proving nothing, so it is worth pinning deliberately rather
+        // than hitting it by luck.
+        {"boundary-even.mp4", 64, 32, 32, 64, 32},
+        {"boundary-odd.mp4", 65, 33, 33, 65, 33},
     };
 
     for (const Case &c : cases) {

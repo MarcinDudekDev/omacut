@@ -158,20 +158,33 @@ QStringList trimArgs(const QString &src, const QString &dst, double start, doubl
          << "-i" << src
          << "-t" << QString::number(end - start, 'f', 3);
     // Cap the shorter side, judged on the decoded (rotation-applied) frame, so
-    // portrait and landscape both keep their aspect ratio. -2 keeps the other
-    // side divisible by two, which libx264 requires.
+    // portrait and landscape both keep their aspect ratio.
     //
-    // The target is min(asked, min(iw,ih)) rather than the asked height, so this
-    // can never upscale no matter what the caller passes. Backend::exportHeights
-    // only offers heights below the source's shorter side, but that governs what
-    // the dialog shows, not what exportClip accepts — asking exportClip for 1080p
-    // on a 720p source used to blow it up to 1080. Expressing the limit inside
-    // the filter keeps it true for every caller, and needs no source dimensions
-    // passed down here to be right.
+    // The target is min(asked, shorter side) rather than the asked height, so
+    // this can never upscale no matter what the caller passes.
+    // Backend::exportHeights only offers heights below the source's shorter
+    // side, but that governs what the dialog shows, not what exportClip
+    // accepts — asking exportClip for 1080p on a 720p source used to blow it up
+    // to 1080. Expressing the limit inside the filter keeps it true for every
+    // caller, and needs no source dimensions passed down here to be right.
+    //
+    // Both sides are computed rather than left to ffmpeg's -2 "round to even",
+    // because -2 rounds even when there is nothing to scale: a 721x405 source
+    // asked for 1080p came back 721 -> 722 wide, and a 33x33 one came back
+    // 33x34. One pixel, but it is an upscale and a changed aspect ratio for a
+    // request that should have been a no-op. So when the target already equals
+    // the shorter side, each side passes through untouched; otherwise both are
+    // scaled and rounded to even, which libx264 requires.
     if (scaleHeight > 0) {
-        const QString target = QString("min(%1,min(iw,ih))").arg(scaleHeight);
+        const QString shortSide = QStringLiteral("min(iw,ih)");
+        const QString target = QStringLiteral("min(%1,%2)").arg(scaleHeight).arg(shortSide);
+        const auto sideExpr = [&](const QString &side) {
+            return QStringLiteral("if(eq(%1,%2),%3,2*round(%3*%1/%2/2))")
+                .arg(target, shortSide, side);
+        };
         args << "-vf"
-             << QString("scale='if(gt(iw,ih),-2,%1)':'if(gt(iw,ih),%1,-2)'").arg(target);
+             << QStringLiteral("scale='%1':'%2'")
+                    .arg(sideExpr(QStringLiteral("iw")), sideExpr(QStringLiteral("ih")));
     }
     args << "-c:v" << "libx264" << "-preset" << "veryfast"
          << "-crf" << "18" << "-c:a" << "aac"

@@ -203,6 +203,7 @@ private slots:
     void exportHeightsNeverUpscale();
     void exportClipNeverUpscalesWhenAskedDirectly();
     void exportClipCapsTheShorterSideInBothOrientations();
+    void exportOriginalCopiesStreamsAndKeepsTheFrameExactly();
     void trimArgsRefuseAClipWithNoLength();
     void themeAccentReadsOmarchyColors();
     void themeAccentForegroundKeepsContrast();
@@ -894,19 +895,33 @@ void BackendTests::qmlQuitConfirmsUnexportedTrim() {
 }
 
 void BackendTests::trimArgsReencodeForPreciseCuts() {
-    const QStringList args = ffmpeg::trimArgs(QStringLiteral("in.mp4"),
-                                              QStringLiteral("out.mp4"),
-                                              0.25, 0.75);
+    // "Original" asks for a length cut and nothing else, so it copies the
+    // streams rather than re-encoding them. Nothing is decoded, so nothing can
+    // be lost and no encoder can refuse the frame size.
+    const QStringList original = ffmpeg::trimArgs(QStringLiteral("in.mp4"),
+                                                  QStringLiteral("out.mp4"),
+                                                  0.25, 0.75);
+    QVERIFY(original.contains(QStringLiteral("copy")));
+    QVERIFY(!original.contains(QStringLiteral("libx264")));
+    QVERIFY(original.contains(QStringLiteral("+faststart")));
 
-    QVERIFY(args.contains(QStringLiteral("libx264")));
-    QVERIFY(args.contains(QStringLiteral("aac")));
-    QVERIFY(args.contains(QStringLiteral("+faststart")));
-    QVERIFY(!args.contains(QStringLiteral("copy")));
+    // Asking for a size is asking for a re-encode; there is no other way to
+    // change the frame.
+    const QStringList scaled = ffmpeg::trimArgs(QStringLiteral("in.mp4"),
+                                                QStringLiteral("out.mp4"),
+                                                0.25, 0.75, 720);
+    QVERIFY(scaled.contains(QStringLiteral("libx264")));
+    QVERIFY(scaled.contains(QStringLiteral("aac")));
+    QVERIFY(scaled.contains(QStringLiteral("+faststart")));
+    QVERIFY(!scaled.contains(QStringLiteral("copy")));
 
-    // Progress reporting goes to stdout so the UI can show a percentage.
-    const int progressAt = args.indexOf(QStringLiteral("-progress"));
-    QVERIFY(progressAt >= 0);
-    QCOMPARE(args.value(progressAt + 1), QStringLiteral("pipe:1"));
+    // Progress reporting goes to stdout so the UI can show a percentage, on
+    // both paths.
+    for (const QStringList &args : {original, scaled}) {
+        const int progressAt = args.indexOf(QStringLiteral("-progress"));
+        QVERIFY(progressAt >= 0);
+        QCOMPARE(args.value(progressAt + 1), QStringLiteral("pipe:1"));
+    }
 }
 
 void BackendTests::trimArgsScaleTheShorterSide() {
@@ -922,13 +937,11 @@ void BackendTests::trimArgsScaleTheShorterSide() {
     QVERIFY(vfAt >= 0);
     // The cap is min(asked, shorter side) rather than the asked height, which is
     // what stops it upscaling for a caller that never consulted exportHeights.
-    // Each side passes through unchanged when the target already equals the
-    // shorter side, so a request with nothing to do does nothing at all.
+    // Both sides are floored to even, and to at least 2: libx264 refuses an odd
+    // frame outright, and on a tiny source the rounding can otherwise reach zero.
     QCOMPARE(args.value(vfAt + 1),
-             QStringLiteral("scale='if(eq(min(1080,min(iw,ih)),min(iw,ih)),iw,"
-                            "2*round(iw*min(1080,min(iw,ih))/min(iw,ih)/2))'"
-                            ":'if(eq(min(1080,min(iw,ih)),min(iw,ih)),ih,"
-                            "2*round(ih*min(1080,min(iw,ih))/min(iw,ih)/2))'"));
+             QStringLiteral("scale='max(2,2*floor(iw*min(1080,min(iw,ih))/min(iw,ih)/2))'"
+                            ":'max(2,2*floor(ih*min(1080,min(iw,ih))/min(iw,ih)/2))'"));
 }
 
 void BackendTests::exportHeightsNeverUpscale() {
@@ -1101,16 +1114,17 @@ void BackendTests::exportClipCapsTheShorterSideInBothOrientations() {
         // Portrait, short side 32. Same numbers, transposed.
         {"port-noupscale.mp4", 32, 64, 48, 32, 64},
         {"port-downscale.mp4", 32, 64, 16, 16, 32},
-        // Odd dimensions. ffmpeg's -2 "round to even" used to fire even when
-        // there was nothing to scale, so 33x33 asked for 720 came back 33x34
-        // and 65x33 came back 66x33. A request above the shorter side has to be
-        // a no-op, odd sides included.
-        {"odd-square-noupscale.mp4", 33, 33, 720, 33, 33},
-        {"odd-land-noupscale.mp4", 65, 33, 720, 65, 33},
-        {"odd-port-noupscale.mp4", 33, 65, 720, 33, 65},
-        // ...and an odd source that really is downscaled still lands on even
-        // sides, because libx264 will not take anything else.
-        {"odd-land-downscale.mp4", 65, 33, 16, 32, 16},
+        // Odd sources on the re-encode path come back EVEN, never odd and never
+        // rounded up. libx264 refuses an odd frame outright - a 1280x719 source
+        // asked for 720p used to exit 187 and write no file at all - and
+        // rounding up would be an upscale for a request that asked for less.
+        // Preserving an odd frame exactly is Original's job now, and Original
+        // copies the streams instead of coming through here.
+        {"odd-square.mp4", 33, 33, 720, 32, 32},
+        {"odd-land.mp4", 65, 33, 720, 64, 32},
+        {"odd-port.mp4", 33, 65, 720, 32, 64},
+        // ...and an odd source that really is downscaled still lands on even.
+        {"odd-land-downscale.mp4", 65, 33, 16, 30, 16},
         // A source smaller than any quality the dialog would ever offer.
         {"tiny-noupscale.mp4", 16, 10, 720, 16, 10},
         // The min() boundary: asked for exactly the shorter side. Round 1's
@@ -1118,7 +1132,11 @@ void BackendTests::exportClipCapsTheShorterSideInBothOrientations() {
         // while proving nothing, so it is worth pinning deliberately rather
         // than hitting it by luck.
         {"boundary-even.mp4", 64, 32, 32, 64, 32},
-        {"boundary-odd.mp4", 65, 33, 33, 65, 33},
+        {"boundary-odd.mp4", 65, 33, 33, 64, 32},
+        // The pair an independent verifier reported: an odd shorter side either
+        // side of the asked height. The second one is the file libx264 refused.
+        {"odd-short-above.mp4", 1280, 721, 720, 1278, 720},
+        {"odd-short-below.mp4", 1280, 719, 720, 1280, 718},
     };
 
     for (const Case &c : cases) {
@@ -1146,6 +1164,34 @@ void BackendTests::exportClipCapsTheShorterSideInBothOrientations() {
                                 .arg(c.name).arg(c.srcW).arg(c.srcH).arg(c.asked)
                                 .arg(info.width).arg(info.height).arg(c.wantW).arg(c.wantH)));
     }
+}
+
+// Original is a length cut and nothing else. It copies the streams, so the frame
+// comes out byte-identical in size and codec - including the odd frame sizes that
+// no encoder will accept, which is what makes this the path that cannot fail on
+// dimensions.
+void BackendTests::exportOriginalCopiesStreamsAndKeepsTheFrameExactly() {
+    const QString src = makeVideo(QStringLiteral("copy-odd.mp4"), 33, 33);
+    QVERIFY(!src.isEmpty());
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+
+    QVERIFY(backend.load(QUrl::fromLocalFile(src)));
+    waitForBackgroundWork(backend);
+
+    const QString out = m_dir.filePath(QStringLiteral("copy-odd-out.mp4"));
+    backend.exportClip(QUrl::fromLocalFile(out), 0.0, 1.0);
+    QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 20000);
+    QVERIFY(failedSpy.isEmpty());
+
+    const ffmpeg::VideoInfo info = ffmpeg::probe(out);
+    QVERIFY2(info.ok, qPrintable(info.error));
+    // 33x33 is a frame libx264 refuses. Copying it through is the whole point.
+    QCOMPARE(info.width, 33);
+    QCOMPARE(info.height, 33);
 }
 
 // Same shape of problem as the upscale one: Backend::exportClip checks the

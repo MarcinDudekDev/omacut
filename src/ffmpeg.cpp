@@ -157,6 +157,28 @@ QStringList trimArgs(const QString &src, const QString &dst, double start, doubl
     args << "-ss" << QString::number(start, 'f', 3)
          << "-i" << src
          << "-t" << QString::number(end - start, 'f', 3);
+    // "Original" is a length cut and nothing else, so it copies the streams
+    // through instead of re-encoding them. That is lossless, near-instant, and
+    // it means libx264 never opens — which retires the whole family of
+    // even-dimension failures for the path most exports take.
+    //
+    // The price, measured rather than assumed, is that a copy can only start on
+    // a keyframe. ffmpeg hides that behind an mp4 edit list, so the presented
+    // clip is right, but the file physically carries everything back to the
+    // previous keyframe. On a 60s 1080p source cut 7.0 -> 12.0:
+    //
+    //   GOP        presented   physical   lead-in   size
+    //   1s          5.066667   5.133334     0.067   3.7 MB
+    //   2s (phone)  5.066667   6.133334     1.067   4.5 MB
+    //   x264 dflt   5.066667  12.133334     7.067   8.7 MB
+    //
+    // and the duration lands within about two frames rather than exactly, where
+    // a re-encode gives 5.000000 every time.
+    if (scaleHeight <= 0) {
+        args << "-c" << "copy" << "-movflags" << "+faststart" << dst;
+        return args;
+    }
+
     // Cap the shorter side, judged on the decoded (rotation-applied) frame, so
     // portrait and landscape both keep their aspect ratio.
     //
@@ -168,24 +190,27 @@ QStringList trimArgs(const QString &src, const QString &dst, double start, doubl
     // to 1080. Expressing the limit inside the filter keeps it true for every
     // caller, and needs no source dimensions passed down here to be right.
     //
-    // Both sides are computed rather than left to ffmpeg's -2 "round to even",
-    // because -2 rounds even when there is nothing to scale: a 721x405 source
-    // asked for 1080p came back 721 -> 722 wide, and a 33x33 one came back
-    // 33x34. One pixel, but it is an upscale and a changed aspect ratio for a
-    // request that should have been a no-op. So when the target already equals
-    // the shorter side, each side passes through untouched; otherwise both are
-    // scaled and rounded to even, which libx264 requires.
-    if (scaleHeight > 0) {
-        const QString shortSide = QStringLiteral("min(iw,ih)");
-        const QString target = QStringLiteral("min(%1,%2)").arg(scaleHeight).arg(shortSide);
-        const auto sideExpr = [&](const QString &side) {
-            return QStringLiteral("if(eq(%1,%2),%3,2*round(%3*%1/%2/2))")
-                .arg(target, shortSide, side);
-        };
-        args << "-vf"
-             << QStringLiteral("scale='%1':'%2'")
-                    .arg(sideExpr(QStringLiteral("iw")), sideExpr(QStringLiteral("ih")));
-    }
+    // Both sides are computed rather than left to ffmpeg's -2 "round to even".
+    // -2 rounds up as readily as down, which on a source with an odd side is an
+    // upscale for a request that should have changed nothing, and it only fixes
+    // the side it is applied to. Leaving an odd side alone is worse than a
+    // pixel: a 1280x719 frame asked for 720p kept its odd height, and whether
+    // that survives depends on the pixel format it lands in —
+    //
+    //   odd frame, 4:4:4 out  -> exit 0, 1280x719
+    //   odd frame, 4:2:0 out  -> exit 187, "height not divisible by 2", no file
+    //
+    // and 4:2:0 is what nearly all real footage encodes to. Flooring both sides
+    // to even removes the condition rather than betting on it. Floored to at
+    // least 2 as well, because on a tiny source the rounding reaches zero.
+    const QString shortSide = QStringLiteral("min(iw,ih)");
+    const QString target = QStringLiteral("min(%1,%2)").arg(scaleHeight).arg(shortSide);
+    const auto sideExpr = [&](const QString &side) {
+        return QStringLiteral("max(2,2*floor(%3*%1/%2/2))").arg(target, shortSide, side);
+    };
+    args << "-vf"
+         << QStringLiteral("scale='%1':'%2'")
+                .arg(sideExpr(QStringLiteral("iw")), sideExpr(QStringLiteral("ih")));
     args << "-c:v" << "libx264" << "-preset" << "veryfast"
          << "-crf" << "18" << "-c:a" << "aac"
          << "-movflags" << "+faststart"

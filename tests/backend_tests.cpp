@@ -202,6 +202,7 @@ private slots:
     void trimArgsScaleTheShorterSide();
     void exportHeightsNeverUpscale();
     void exportClipNeverUpscalesWhenAskedDirectly();
+    void exportClipCapsTheShorterSideInBothOrientations();
     void trimArgsRefuseAClipWithNoLength();
     void themeAccentReadsOmarchyColors();
     void themeAccentForegroundKeepsContrast();
@@ -217,6 +218,7 @@ private:
     QString formatName(const QString &path) const;
     void waitForBackgroundWork(Backend &backend);
     bool installBrokenFfmpeg(const QString &dirPath);
+    QString makeVideo(const QString &name, int width, int height);
 
     QTemporaryDir m_dir;
     QString m_videoPath;
@@ -249,6 +251,27 @@ void BackendTests::initTestCase() {
     QCOMPARE(proc.exitStatus(), QProcess::NormalExit);
     QCOMPARE(proc.exitCode(), 0);
     QVERIFY(QFileInfo::exists(m_videoPath));
+}
+
+QString BackendTests::makeVideo(const QString &name, int width, int height) {
+    const QString path = m_dir.filePath(name);
+    const QString ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    if (ffmpeg.isEmpty())
+        return {};
+
+    QProcess proc;
+    proc.start(ffmpeg, {
+        QStringLiteral("-hide_banner"),
+        QStringLiteral("-loglevel"), QStringLiteral("error"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"),
+        QStringLiteral("-i"),
+        QStringLiteral("testsrc=size=%1x%2:rate=1:duration=1").arg(width).arg(height),
+        QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+        QStringLiteral("-y"), path,
+    });
+    if (!proc.waitForFinished(20000) || proc.exitCode() != 0)
+        return {};
+    return path;
 }
 
 void BackendTests::waitForBackgroundWork(Backend &backend) {
@@ -1041,6 +1064,61 @@ void BackendTests::exportClipNeverUpscalesWhenAskedDirectly() {
     QVERIFY2(downInfo.ok, qPrintable(downInfo.error));
     QCOMPARE(downInfo.width, 16);
     QCOMPARE(downInfo.height, 16);
+}
+
+// The scale filter has two branches, picked by gt(iw,ih): landscape caps the
+// height and leaves the width free, portrait caps the width and leaves the
+// height free. The 32x32 fixture takes the portrait branch for both, so on its
+// own it locks half the expression - an edit to the landscape side would not go
+// red. Both orientations, both directions, so nothing here is untested.
+//
+// This was worth doing because a reviewer read the expression as capping HEIGHT
+// unconditionally and expected a 720x1280 clip asked for 1080p to come back
+// around 405x720. It comes back 720x1280. The premise was wrong, but nothing in
+// the suite said so, and Marcin shoots vertical on a phone.
+void BackendTests::exportClipCapsTheShorterSideInBothOrientations() {
+    struct Case {
+        const char *name;
+        int srcW;
+        int srcH;
+        int asked;
+        int wantW;
+        int wantH;
+    };
+    static const Case cases[] = {
+        // Landscape, short side 32.
+        {"land-noupscale.mp4", 64, 32, 48, 64, 32},
+        {"land-downscale.mp4", 64, 32, 16, 32, 16},
+        // Portrait, short side 32. Same numbers, transposed.
+        {"port-noupscale.mp4", 32, 64, 48, 32, 64},
+        {"port-downscale.mp4", 32, 64, 16, 16, 32},
+    };
+
+    for (const Case &c : cases) {
+        const QString src = makeVideo(QStringLiteral("src-%1x%2.mp4").arg(c.srcW).arg(c.srcH),
+                                      c.srcW, c.srcH);
+        QVERIFY2(!src.isEmpty(), c.name);
+
+        ThumbProvider provider;
+        Backend backend(&provider, new FakeFilePicker);
+        QSignalSpy doneSpy(&backend, &Backend::exportDone);
+        QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+
+        QVERIFY(backend.load(QUrl::fromLocalFile(src)));
+        waitForBackgroundWork(backend);
+
+        const QString out = m_dir.filePath(QString::fromUtf8(c.name));
+        backend.exportClip(QUrl::fromLocalFile(out), 0.0, 1.0, c.asked);
+        QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 20000);
+        QVERIFY2(failedSpy.isEmpty(), c.name);
+
+        const ffmpeg::VideoInfo info = ffmpeg::probe(out);
+        QVERIFY2(info.ok, qPrintable(QString("%1: %2").arg(c.name, info.error)));
+        QVERIFY2(info.width == c.wantW && info.height == c.wantH,
+                 qPrintable(QString("%1: %2x%3 source asked %4, got %5x%6, wanted %7x%8")
+                                .arg(c.name).arg(c.srcW).arg(c.srcH).arg(c.asked)
+                                .arg(info.width).arg(info.height).arg(c.wantW).arg(c.wantH)));
+    }
 }
 
 // Same shape of problem as the upscale one: Backend::exportClip checks the

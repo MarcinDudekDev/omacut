@@ -1403,10 +1403,18 @@ void BackendTests::exportOriginalHonoursTheCopyPlan() {
 // was equality once, that claim is false for this path, and someone will
 // otherwise spend a day chasing a ghost.
 //
-// The re-encode path is near-exact and keeps a tight bound - but not equality
-// either, which is worth measuring rather than assuming: integer frame rates
-// give 2.000000 exactly, and 30000/1001 gives 2.002000. 0.01s is well inside a
-// single frame at any rate and would still catch a real regression.
+// The re-encode path keeps a much tighter bound, but not equality either, and
+// that is the part worth writing down rather than leaving 0.01 looking like a
+// number someone picked. "Exact to six decimal places" was wrong for THIS path
+// too, not only for the copy - it just never showed, because every fixture had a
+// round frame rate:
+//
+//     24 fps -> 2.000000     30 fps -> 2.000000     60 fps -> 2.000000
+//     30000/1001 (NTSC) -> 2.002000
+//
+// One NTSC source is all it takes. 0.01s is inside a single frame at any rate we
+// would meet and still catches a real regression, and it is a measurement, not a
+// preference.
 void BackendTests::exportDurationHoldsOnBothPaths_data() {
     QTest::addColumn<QString>("rate");
     QTest::addRow("24 fps") << QStringLiteral("24");

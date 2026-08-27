@@ -38,6 +38,8 @@ On macOS, see [macOS](#macos) below — this fork builds and runs there too.
 
 Exports are always written as MP4 files, regardless of the input video's container. The export dialog offers Original/1080p/720p quality — never upscaling, and always preserving the aspect ratio.
 
+**Original copies the streams instead of re-encoding them.** The cut is lossless and near-instant, and the frame is untouched — but the codec is whatever the source had, so a VP9 WebM comes out as VP9 in an MP4 container rather than H.264. A copy can also only begin on a keyframe: the clip you get is the one you asked for, because the timing is carried in an MP4 edit list, but the file physically holds everything back to the previous keyframe. On long-GOP sources that is several seconds of hidden lead-in and a noticeably larger file, and a player that ignores edit lists will show it. Pick 1080p or 720p to re-encode instead — those are frame-exact H.264/AAC.
+
 ## Build
 
 Uses Qt's own build tool, `qmake6` (no cmake needed):

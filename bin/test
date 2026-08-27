@@ -8,8 +8,11 @@ if command -v qmake6 >/dev/null 2>&1; then
   QMAKE=qmake6
 elif command -v qmake >/dev/null 2>&1; then
   QMAKE=qmake
+elif command -v brew >/dev/null 2>&1 && [ -x "$(brew --prefix qt 2>/dev/null)/bin/qmake6" ]; then
+  QMAKE="$(brew --prefix qt)/bin/qmake6"
 else
   echo "qmake6 or qmake is required to test omacut." >&2
+  echo "On macOS: brew install qt ffmpeg" >&2
   exit 1
 fi
 

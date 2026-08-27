@@ -8,8 +8,13 @@ if command -v qmake6 >/dev/null 2>&1; then
   QMAKE=qmake6
 elif command -v qmake >/dev/null 2>&1; then
   QMAKE=qmake
+# Homebrew links qmake into its own bin, but a login shell that predates
+# `brew install qt` won't have picked it up yet.
+elif command -v brew >/dev/null 2>&1 && [ -x "$(brew --prefix qt 2>/dev/null)/bin/qmake6" ]; then
+  QMAKE="$(brew --prefix qt)/bin/qmake6"
 else
   echo "qmake6 or qmake is required to build omacut." >&2
+  echo "On macOS: brew install qt ffmpeg" >&2
   exit 1
 fi
 
@@ -27,4 +32,10 @@ cd "$BUILD_DIR"
 "$QMAKE" "$ROOT/omacut.pro"
 make -j"$JOBS"
 
-echo "Built $BUILD_DIR/omacut"
+# macOS builds an .app bundle, not a bare binary — say where it actually is.
+if [ -d "$BUILD_DIR/omacut.app" ]; then
+  echo "Built $BUILD_DIR/omacut.app"
+  echo "Run it with: open $BUILD_DIR/omacut.app"
+else
+  echo "Built $BUILD_DIR/omacut"
+fi

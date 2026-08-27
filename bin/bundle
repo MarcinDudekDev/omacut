@@ -1,0 +1,50 @@
+#!/usr/bin/env sh
+# Turn build/omacut.app into a self-contained bundle: copies the Qt frameworks
+# and QML plugins in, rewrites the load paths, and re-signs. After this the .app
+# runs on a Mac with no Homebrew and no Qt — drag it to /Applications and go.
+#
+# ffmpeg is NOT bundled. It stays an external dependency (`brew install ffmpeg`),
+# same as on Linux, because shipping a GPL ffmpeg build inside an MIT app is a
+# licensing question, not a packaging one.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+APP="$ROOT/build/omacut.app"
+
+case "$(uname -s)" in
+  Darwin) ;;
+  *) echo "bin/bundle is macOS-only; on Linux use bin/install." >&2; exit 1 ;;
+esac
+
+[ -d "$APP" ] || { echo "No $APP — run ./bin/build first." >&2; exit 1; }
+
+if command -v macdeployqt6 >/dev/null 2>&1; then
+  DEPLOY=macdeployqt6
+elif command -v macdeployqt >/dev/null 2>&1; then
+  DEPLOY=macdeployqt
+elif command -v brew >/dev/null 2>&1 && [ -x "$(brew --prefix qt 2>/dev/null)/bin/macdeployqt" ]; then
+  DEPLOY="$(brew --prefix qt)/bin/macdeployqt"
+else
+  echo "macdeployqt is required to bundle omacut (brew install qt)." >&2
+  exit 1
+fi
+
+# Homebrew splits Qt into one keg per module and macdeployqt only searches the
+# handful that appear in the binary's rpath, so QtSvg and friends come back as
+# "Cannot resolve rpath" unless the umbrella lib dir is on the search path too.
+LIBPATH=""
+if command -v brew >/dev/null 2>&1 && [ -d "$(brew --prefix)/lib" ]; then
+  LIBPATH="-libpath=$(brew --prefix)/lib"
+fi
+
+# -qmldir points at the QML sources, not the app: the UI ships inside a Qt
+# resource, which macdeployqt cannot scan for imports.
+"$DEPLOY" "$APP" -qmldir="$ROOT/src" ${LIBPATH:+$LIBPATH}
+
+# arm64 refuses to run a binary whose signature no longer matches, and
+# macdeployqt has just rewritten every load command in it.
+codesign --force --deep --sign - "$APP"
+codesign --verify --deep --strict "$APP"
+
+echo "Bundled $APP"
+echo "Install it with: cp -R $APP /Applications/"

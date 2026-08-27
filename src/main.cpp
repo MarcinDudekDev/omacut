@@ -1,6 +1,17 @@
 // omacut — a dead-simple video length trimmer. Qt Quick (QML) UI, ffmpeg cuts.
 
+#include <QtGlobal>
+
+#ifdef Q_OS_LINUX
 #include <QGuiApplication>
+using OmacutApplication = QGuiApplication;
+#else
+// Everywhere but Linux the file dialogs are QtWidgets' native ones, and those
+// need a QApplication rather than a bare QGuiApplication.
+#include <QApplication>
+using OmacutApplication = QApplication;
+#endif
+
 #include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -10,8 +21,40 @@
 #include "backend.h"
 #include "thumbprovider.h"
 
+#ifdef Q_OS_MACOS
+#include <QEvent>
+#include <QFileOpenEvent>
+#include <QObject>
+
+namespace {
+// Finder hands a double-clicked video, an "Open With", or a drop on the Dock
+// icon to a Mac app as a QFileOpenEvent — never on the command line. Without
+// this the app would open on an empty window and look broken.
+class FileOpenFilter : public QObject {
+public:
+    FileOpenFilter(Backend *backend, QObject *parent)
+        : QObject(parent), m_backend(backend) {}
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (event->type() == QEvent::FileOpen) {
+            const QUrl url = static_cast<QFileOpenEvent *>(event)->url();
+            if (url.isLocalFile()) {
+                m_backend->load(url);
+                return true;
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    Backend *m_backend;
+};
+}
+#endif
+
 int main(int argc, char *argv[]) {
-    QGuiApplication app(argc, argv);
+    OmacutApplication app(argc, argv);
     app.setApplicationName("omacut");
 
     // Associates the window with omacut.desktop so the compositor (Wayland app_id
@@ -24,6 +67,10 @@ int main(int argc, char *argv[]) {
 
     auto *provider = new ThumbProvider();
     Backend backend(provider, &app);
+
+#ifdef Q_OS_MACOS
+    app.installEventFilter(new FileOpenFilter(&backend, &app));
+#endif
 
     QQmlApplicationEngine engine;
 

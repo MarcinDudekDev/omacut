@@ -10,3 +10,4 @@ moc_*.cpp
 qrc_*.cpp
 .qmake.stash
 Makefile
+/macos/omacut.iconset/

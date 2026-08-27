@@ -21,6 +21,9 @@
 
 namespace {
 constexpr int kThumbCount = 12;
+// Larger than any real frame, so trimArgs' min(asked, shorter side) resolves to the
+// source's own size: a re-encode that resizes nothing.
+constexpr int kReencodeAtSourceSize = 1 << 20;
 constexpr int kThumbRevealMs = 70;
 const QString kDefaultAccent = QStringLiteral("#FFD60A");
 
@@ -361,14 +364,26 @@ void Backend::exportClip(const QUrl &dst, double start, double end, int scaleHei
     // success, so failed/cancelled exports preserve any existing file.
     const QString tmpPath = outPath + QStringLiteral(".omacut-part.mp4");
     QFile::remove(tmpPath);
+
+    // A stream copy can be refused by the MP4 muxer for a codec it will not
+    // carry. That is not a reason to hand back an error: the user asked for a
+    // clip, so fall back to a re-encode and say so afterwards in one sentence.
+    m_reencodedAfterCopyFailed = false;
+    runTrim(outPath, tmpPath, start, end, scaleHeight, scaleHeight <= 0);
+}
+
+void Backend::runTrim(const QString &outPath, const QString &tmpPath, double start, double end,
+                      int scaleHeight, bool allowReencodeFallback) {
+    const QString ffmpegBin = ffmpeg::toolPath("ffmpeg");
     const QStringList args = ffmpeg::trimArgs(m_path, tmpPath, start, end, scaleHeight);
-    // trimArgs refuses a clip with no length. The check above already caught
-    // that, so this is the belt to its braces: never hand ffmpeg an empty
-    // argument list and let it read stdin instead.
-    if (args.isEmpty()) {
+    // trimArgs refuses a clip with no length. exportClip already caught that, so
+    // this is the belt to its braces: never hand ffmpeg an empty argument list
+    // and let it read stdin instead.
+    if (ffmpegBin.isEmpty() || args.isEmpty()) {
         setBusy(false);
         setStatus(QString());
-        emit exportFailed("The selected clip has no length.");
+        emit exportFailed(args.isEmpty() ? QStringLiteral("The selected clip has no length.")
+                                         : QStringLiteral("`ffmpeg` was not found on your PATH."));
         return;
     }
 
@@ -398,13 +413,23 @@ void Backend::exportClip(const QUrl &dst, double start, double end, int scaleHei
             });
 
     connect(proc, &QProcess::finished, this,
-            [this, proc, outPath, tmpPath, completed](int code, QProcess::ExitStatus exitStatus) {
+            [this, proc, outPath, tmpPath, start, end, completed, allowReencodeFallback](
+                int code, QProcess::ExitStatus exitStatus) {
                 if (*completed)
                     return;
                 *completed = true;
                 const QString err = QString::fromUtf8(proc->readAllStandardError()).trimmed();
                 proc->deleteLater();
                 if (exitStatus != QProcess::NormalExit || code != 0) {
+                    if (allowReencodeFallback) {
+                        QFile::remove(tmpPath);
+                        m_reencodedAfterCopyFailed = true;
+                        setStatus(QStringLiteral("Exporting 0%"));
+                        // kReencodeAtSourceSize caps at the source's own shorter
+                        // side, so this re-encodes without resizing anything.
+                        runTrim(outPath, tmpPath, start, end, kReencodeAtSourceSize, false);
+                        return;
+                    }
                     failExport(tmpPath, err.isEmpty() ? QStringLiteral("ffmpeg trim failed.") : err);
                     return;
                 }
@@ -414,6 +439,12 @@ void Backend::exportClip(const QUrl &dst, double start, double end, int scaleHei
                 }
                 setBusy(false);
                 setStatus(QString());
+                if (m_reencodedAfterCopyFailed) {
+                    m_reencodedAfterCopyFailed = false;
+                    emit exportNotice(QStringLiteral(
+                        "This video's format could not be copied into an MP4, so the clip was "
+                        "re-encoded."));
+                }
                 emit exportDone(outPath);
             });
     connect(proc, &QProcess::errorOccurred, this,

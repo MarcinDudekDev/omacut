@@ -792,6 +792,9 @@ ApplicationWindow {
             win.exportedEndSec = win.pendingExportEndSec;
             win.showNotice("Saved " + path);
         }
+        function onExportNotice(message) {
+            win.showNotice(message);
+        }
         function onExportFailed(message) {
             win.showNotice("Export failed: " + message);
         }

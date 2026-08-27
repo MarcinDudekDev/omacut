@@ -38,7 +38,15 @@ On macOS, see [macOS](#macos) below — this fork builds and runs there too.
 
 Exports are always written as MP4 files, regardless of the input video's container. The export dialog offers Original/1080p/720p quality — never upscaling, and always preserving the aspect ratio.
 
-**Original copies the streams instead of re-encoding them.** The cut is lossless and near-instant, and the frame is untouched — but the codec is whatever the source had, so a VP9 WebM comes out as VP9 in an MP4 container rather than H.264. A copy can also only begin on a keyframe: the clip you get is the one you asked for, because the timing is carried in an MP4 edit list, but the file physically holds everything back to the previous keyframe. On long-GOP sources that is several seconds of hidden lead-in and a noticeably larger file, and a player that ignores edit lists will show it. Pick 1080p or 720p to re-encode instead — those are frame-exact H.264/AAC.
+**Original copies the streams instead of re-encoding them.** The cut is lossless and near-instant, and the frame is untouched, including frame sizes no encoder would accept. Two things follow.
+
+The codec is whatever the source had. A VP9 WebM comes out as VP9 in an MP4 container rather than H.264. For anything recorded with OBS, a phone or a camera that is H.264 already, so nothing changes; it is downloaded WebM that comes out differently. If the MP4 container will not carry the source codec at all — FLV1, for instance — the export re-encodes instead of failing, and says so once.
+
+A copy can only begin on a keyframe. The clip you get is still the one you asked for, because the timing is carried in an **MP4 edit list**, but the file physically holds everything back to the previous keyframe. On long-GOP sources that is several seconds of hidden lead-in and a noticeably larger file.
+
+> **Do not strip the edit list "for compatibility".** It is the only record that the leading GOP is not part of the clip. Everything that reads through ffmpeg honours it, remuxes and re-encodes included, so the cut survives an upload pipeline. A tool that ignores it on remux emits the whole span starting at the keyframe and writes no `elst` — and then the intent is gone, so the damage can be neither detected nor undone. It is a one-way door.
+
+Pick 1080p or 720p to re-encode instead — those are frame-exact H.264/AAC.
 
 ## Build
 

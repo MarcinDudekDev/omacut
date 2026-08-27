@@ -204,6 +204,7 @@ private slots:
     void exportClipNeverUpscalesWhenAskedDirectly();
     void exportClipCapsTheShorterSideInBothOrientations();
     void exportOriginalCopiesStreamsAndKeepsTheFrameExactly();
+    void exportFallsBackToReencodeWhenTheCopyWillNotMux();
     void trimArgsRefuseAClipWithNoLength();
     void themeAccentReadsOmarchyColors();
     void themeAccentForegroundKeepsContrast();
@@ -276,6 +277,13 @@ QString BackendTests::makeVideo(const QString &name, int width, int height) {
         QStringLiteral("-y"), path,
     });
     if (!proc.waitForFinished(20000) || proc.exitCode() != 0)
+        return {};
+
+    // Do not trust that asking produced it. testsrc keeps an odd size and
+    // testsrc2 silently rounds it to even, so a fixture built with the wrong
+    // generator tests nothing and looks green while doing it.
+    const ffmpeg::VideoInfo made = ffmpeg::probe(path);
+    if (!made.ok || made.width != width || made.height != height)
         return {};
     return path;
 }
@@ -1192,6 +1200,63 @@ void BackendTests::exportOriginalCopiesStreamsAndKeepsTheFrameExactly() {
     // 33x33 is a frame libx264 refuses. Copying it through is the whole point.
     QCOMPARE(info.width, 33);
     QCOMPARE(info.height, 33);
+}
+
+// A stream copy is only possible if the MP4 muxer will carry the source codec.
+// FLV1 is one it will not: "Could not find tag for codec flv1". Refusing the
+// export there would be a step backwards from re-encoding everything, so the
+// copy failure has to fall back rather than surface. The user asked for a clip.
+void BackendTests::exportFallsBackToReencodeWhenTheCopyWillNotMux() {
+    const QString ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    QVERIFY(!ffmpeg.isEmpty());
+    const QString src = m_dir.filePath(QStringLiteral("flv1.flv"));
+    QProcess make;
+    make.start(ffmpeg, {QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"),
+                        QStringLiteral("error"), QStringLiteral("-f"), QStringLiteral("lavfi"),
+                        QStringLiteral("-i"),
+                        QStringLiteral("testsrc=size=64x48:rate=10:duration=2"),
+                        QStringLiteral("-c:v"), QStringLiteral("flv"),
+                        QStringLiteral("-y"), src});
+    QVERIFY(make.waitForFinished(20000));
+    if (make.exitCode() != 0)
+        QSKIP("this ffmpeg cannot write FLV1, so there is nothing to refuse");
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+    QSignalSpy noticeSpy(&backend, &Backend::exportNotice);
+
+    QVERIFY(backend.load(QUrl::fromLocalFile(src)));
+    waitForBackgroundWork(backend);
+
+    const QString out = m_dir.filePath(QStringLiteral("flv1-out.mp4"));
+    backend.exportClip(QUrl::fromLocalFile(out), 0.0, 1.0);
+    QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 30000);
+
+    QVERIFY2(failedSpy.isEmpty(), "a codec MP4 will not carry must not fail the export");
+    QCOMPARE(doneSpy.count(), 1);
+    // ...and the user is told, once, why the file is not a copy of the source.
+    QCOMPARE(noticeSpy.count(), 1);
+
+    const ffmpeg::VideoInfo info = ffmpeg::probe(out);
+    QVERIFY2(info.ok, qPrintable(info.error));
+    QCOMPARE(formatName(out), QStringLiteral("mov,mp4,m4a,3gp,3g2,mj2"));
+    QVERIFY(!backend.busy());
+
+    // The positive control: a source that CAN be copied is still copied, so the
+    // fallback has not quietly become the only path.
+    QSignalSpy copyNotice(&backend, &Backend::exportNotice);
+    const QString copyable = makeVideo(QStringLiteral("copyable.mp4"), 64, 48);
+    QVERIFY(!copyable.isEmpty());
+    QVERIFY(backend.load(QUrl::fromLocalFile(copyable)));
+    waitForBackgroundWork(backend);
+    doneSpy.clear();
+    backend.exportClip(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("copyable-out.mp4"))),
+                       0.0, 1.0);
+    QTRY_VERIFY_WITH_TIMEOUT(doneSpy.count() + failedSpy.count() > 0, 30000);
+    QVERIFY(failedSpy.isEmpty());
+    QCOMPARE(copyNotice.count(), 0);
 }
 
 // Same shape of problem as the upscale one: Backend::exportClip checks the

@@ -174,6 +174,16 @@ QStringList trimArgs(const QString &src, const QString &dst, double start, doubl
     //
     // and the duration lands within about two frames rather than exactly, where
     // a re-encode gives 5.000000 every time.
+    //
+    // DO NOT "fix" this by dropping the edit list. It is the only thing telling
+    // a reader that the leading GOP is not part of the clip. Everything that
+    // reads through ffmpeg honours it by default, including a remux and a
+    // re-encode, so the cut survives an upload pipeline. But a tool that ignores
+    // it on remux emits the whole span starting at the keyframe and writes no
+    // elst, and at that point the original intent is gone: the file no longer
+    // records where the cut was meant to be, so the damage can be neither
+    // detected nor undone. It is a one-way door, which is why it is written
+    // down here and in the README rather than left for someone to rediscover.
     if (scaleHeight <= 0) {
         args << "-c" << "copy" << "-movflags" << "+faststart" << dst;
         return args;

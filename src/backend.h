@@ -81,6 +81,9 @@ signals:
     void statusChanged();
     void themeAccentChanged();
     void exportDone(const QString &path);
+    // Something worth one sentence that is not a failure — currently only "the
+    // stream copy would not mux, so it was re-encoded".
+    void exportNotice(const QString &message);
     void exportFailed(const QString &message);
     void loadError(const QString &message);
 
@@ -88,6 +91,8 @@ private:
     void setBusy(bool busy);
     void setStatus(const QString &status);
     void failExport(const QString &tmpPath, const QString &message);
+    void runTrim(const QString &outPath, const QString &tmpPath, double start, double end,
+                 int scaleHeight, bool allowReencodeFallback);
     void startThumbs();
     void stopThumbs();
     void revealNextThumb();
@@ -112,6 +117,7 @@ private:
     bool m_thumbWorkerDone = false;
     bool m_busy = false;
     QString m_status;
+    bool m_reencodedAfterCopyFailed = false;
     QString m_themeAccent;
     QTimer m_thumbRevealTimer;
     QFileSystemWatcher m_themeWatcher;
